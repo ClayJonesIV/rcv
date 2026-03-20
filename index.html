@@ -11,323 +11,326 @@
   <style>
     *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
     body{background:#0b0d14;color:#dfe1ec;font-family:'Barlow',sans-serif;-webkit-font-smoothing:antialiased}
-    input[type=number]::-webkit-inner-spin-button,input[type=number]::-webkit-outer-spin-button{-webkit-appearance:none}
-    input[type=number]{-moz-appearance:textfield}
     ::-webkit-scrollbar{width:6px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:#2a2f48;border-radius:3px}
     ::selection{background:#4f8aff44}
     @keyframes spin{to{transform:rotate(360deg)}}
+    select{appearance:none;-webkit-appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%237b8098' d='M2 4l4 4 4-4'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 10px center;padding-right:28px !important}
   </style>
 </head>
 <body>
 <div id="root"></div>
 <script type="text/babel">
-const{useState,useRef,useCallback,useMemo,useEffect}=React;
+const{useState,useMemo,useEffect}=React;
 
 const BASES=[{key:"___",label:"Empty",short:"—"},{key:"1__",label:"1st",short:"1B"},{key:"_2_",label:"2nd",short:"2B"},{key:"__3",label:"3rd",short:"3B"},{key:"12_",label:"1st & 2nd",short:"1,2"},{key:"1_3",label:"1st & 3rd",short:"1,3"},{key:"_23",label:"2nd & 3rd",short:"2,3"},{key:"123",label:"Loaded",short:"FUL"}];
 const OUTS=[0,1,2];
 const S24=[];OUTS.forEach(o=>BASES.forEach(b=>S24.push({outs:o,baseKey:b.key,baseLabel:b.label,baseShort:b.short,id:`${o}_${b.key}`})));
 const K=50;
 const mono="'IBM Plex Mono',monospace";
-const C={bg:"#0b0d14",card:"#111420",cardH:"#161a28",bdr:"#1e2235",bdrL:"#2a2f48",txt:"#dfe1ec",dim:"#7b8098",mut:"#4a4f68",acc:"#4f8aff",grn:"#34d399",grnBg:"#0d2a20",yel:"#fbbf24",ylBg:"#2a2410",red:"#f87171",rdBg:"#2a1215",org:"#fb923c"};
-const rc=v=>{if(v===null)return C.dim;if(v>=1.15)return C.grn;if(v>=1.05)return"#86efac";if(v>=.95)return C.yel;if(v>=.85)return C.org;return C.red};
-const rl=v=>{if(v===null)return"N/A";if(v>=1.15)return"Elite";if(v>=1.05)return"Above Avg";if(v>=.95)return"Average";if(v>=.85)return"Below Avg";return"Poor"};
+const C={bg:"#0b0d14",card:"#111420",cardH:"#161a28",bdr:"#1e2235",bdrL:"#2a2f48",txt:"#dfe1ec",dim:"#7b8098",mut:"#4a4f68",acc:"#4f8aff",grn:"#34d399",yel:"#fbbf24",ylBg:"#2a2410",red:"#f87171",org:"#fb923c"};
+const rc=v=>{if(v==null)return C.dim;if(v>=1.15)return C.grn;if(v>=1.05)return"#86efac";if(v>=.95)return C.yel;if(v>=.85)return C.org;return C.red};
+const rl=v=>{if(v==null)return"N/A";if(v>=1.15)return"Elite";if(v>=1.05)return"Above Avg";if(v>=.95)return"Average";if(v>=.85)return"Below Avg";return"Poor"};
 
-/* ─── Compute league averages dynamically from raw data ─── */
-function buildLeagueRates(raw, seasonFilter) {
-  const f = seasonFilter === "All" ? raw : raw.filter(r => r.season === seasonFilter);
-  const m = {};
-  f.forEach(r => {
-    const sid = `${r.outs}_${r.bases}`;
-    if (!m[sid]) m[sid] = { pa: 0, rbi: 0 };
-    m[sid].pa += r.pa;
-    m[sid].rbi += r.rbi;
-  });
-  const rates = {};
-  Object.entries(m).forEach(([sid, d]) => { rates[sid] = d.pa > 0 ? d.rbi / d.pa : 0; });
-  return { rates, totals: m };
+/* ─── Proper CSV parser that handles quoted fields with commas ─── */
+function parseCSVLine(line){
+  const result=[];let current="",inQuotes=false;
+  for(let i=0;i<line.length;i++){
+    const ch=line[i];
+    if(inQuotes){
+      if(ch==='"'){if(i+1<line.length&&line[i+1]==='"'){current+='"';i++}else inQuotes=false}
+      else current+=ch;
+    }else{
+      if(ch==='"')inQuotes=true;
+      else if(ch===','){result.push(current.trim());current=""}
+      else current+=ch;
+    }
+  }
+  result.push(current.trim());
+  return result;
 }
 
-function computeRCv(pd, lr) {
-  let tPA = 0, ws = 0; const sd = [];
-  S24.forEach(s => {
-    const pa = pd[s.id]?.pa || 0, rbi = pd[s.id]?.rbi || 0, lgr = lr[s.id] || 0; tPA += pa;
-    if (pa > 0 && lgr > 0) { const pr = rbi / pa, ar = (pa * pr + K * lgr) / (pa + K); sd.push({ ...s, pa, rbi, playerRate: pr, adjRate: ar, leagueRate: lgr, stateScore: ar / lgr }) }
-    else if (pa > 0) sd.push({ ...s, pa, rbi, playerRate: rbi / pa, adjRate: 0, leagueRate: lgr, stateScore: 1.0 })
-  });
-  if (tPA === 0) return { rcv: null, stateDetails: sd, totalPA: 0, totalRBI: 0 };
-  sd.forEach(d => { ws += d.stateScore * (d.pa / tPA) });
-  return { rcv: ws, stateDetails: sd, totalPA: tPA, totalRBI: sd.reduce((s, d) => s + d.rbi, 0) }
+function parseCSV(text){
+  const lines=text.replace(/\r\n/g,"\n").replace(/\r/g,"\n").trim().split("\n").filter(l=>l.trim());
+  if(lines.length<2)return null;
+  const h=parseCSVLine(lines[0]).map(x=>x.toLowerCase());
+  const pi=h.findIndex(x=>x==="player"||x==="name"),ti=h.findIndex(x=>x==="team"),oi=h.findIndex(x=>x==="outs"),bi=h.findIndex(x=>x==="bases"||x==="runners"||x==="base_state"),pai=h.findIndex(x=>x==="pa"||x==="plate_appearances"),ri=h.findIndex(x=>x==="rbi"||x==="runs_batted_in"),si=h.findIndex(x=>x==="season"||x==="year");
+  if(pi===-1||oi===-1||bi===-1||pai===-1||ri===-1)return null;
+  const raw=[];
+  for(let i=1;i<lines.length;i++){
+    const cc=parseCSVLine(lines[i]);
+    const name=cc[pi],team=ti!==-1?cc[ti]:"",outs=parseInt(cc[oi]),bases=cc[bi],pa=parseInt(cc[pai]),rbi=parseInt(cc[ri]),season=si!==-1?cc[si]:"All";
+    if(!name||isNaN(outs)||isNaN(pa)||isNaN(rbi))continue;
+    raw.push({name,team,season,outs,bases,pa,rbi});
+  }
+  const seasons=[...new Set(raw.map(r=>r.season))].sort();
+  const teams=[...new Set(raw.map(r=>r.team).filter(Boolean))].sort();
+  const ptMap={};raw.forEach(r=>{if(!r.team)return;if(!ptMap[r.name])ptMap[r.name]={};ptMap[r.name][r.team]=(ptMap[r.name][r.team]||0)+r.pa});
+  const playerTeam={};Object.entries(ptMap).forEach(([name,tm])=>{let best="",max=0;Object.entries(tm).forEach(([t,pa])=>{if(pa>max){max=pa;best=t}});playerTeam[name]=best});
+  return{raw,seasons,teams,playerTeam};
 }
 
-function parseCSV(text) {
-  const lines = text.trim().split("\n").filter(l => l.trim()); if (lines.length < 2) return null;
-  const h = lines[0].split(",").map(x => x.trim().toLowerCase());
-  const pi = h.findIndex(x => x === "player" || x === "name"), ti = h.findIndex(x => x === "team"), oi = h.findIndex(x => x === "outs"), bi = h.findIndex(x => x === "bases" || x === "runners" || x === "base_state"), pai = h.findIndex(x => x === "pa" || x === "plate_appearances"), ri = h.findIndex(x => x === "rbi" || x === "runs_batted_in"), si = h.findIndex(x => x === "season" || x === "year");
-  if (pi === -1 || oi === -1 || bi === -1 || pai === -1 || ri === -1) return null;
-  const raw = [];
-  for (let i = 1; i < lines.length; i++) { const cc = lines[i].split(",").map(x => x.trim()); const name = cc[pi], team = ti !== -1 ? cc[ti] : "", outs = parseInt(cc[oi]), bases = cc[bi], pa = parseInt(cc[pai]), rbi = parseInt(cc[ri]), season = si !== -1 ? cc[si] : "All"; if (!name || isNaN(outs) || isNaN(pa) || isNaN(rbi)) continue; raw.push({ name, team, season, outs, bases, pa, rbi }) }
-  const seasons = [...new Set(raw.map(r => r.season))].sort();
-  const teams = [...new Set(raw.map(r => r.team).filter(Boolean))].sort();
-  const ptMap = {}; raw.forEach(r => { if (!r.team) return; if (!ptMap[r.name]) ptMap[r.name] = {}; ptMap[r.name][r.team] = (ptMap[r.name][r.team] || 0) + r.pa });
-  const playerTeam = {}; Object.entries(ptMap).forEach(([name, teams]) => { let best = "", max = 0; Object.entries(teams).forEach(([t, pa]) => { if (pa > max) { max = pa; best = t } }); playerTeam[name] = best });
-  return { raw, seasons, teams, playerTeam, hasSeason: si !== -1, hasTeam: ti !== -1 };
+function buildLeagueRates(raw,seasonFilter){
+  const f=seasonFilter==="All"?raw:raw.filter(r=>r.season===seasonFilter);
+  const m={};f.forEach(r=>{const sid=`${r.outs}_${r.bases}`;if(!m[sid])m[sid]={pa:0,rbi:0};m[sid].pa+=r.pa;m[sid].rbi+=r.rbi});
+  const rates={};Object.entries(m).forEach(([sid,d])=>{rates[sid]=d.pa>0?d.rbi/d.pa:0});
+  return rates;
 }
 
-function aggregate(raw, sf, teamFilter) {
-  let f = sf === "All" ? raw : raw.filter(r => r.season === sf);
-  if (teamFilter && teamFilter !== "All") f = f.filter(r => r.team === teamFilter);
-  // Build league rates from the season-filtered data (all teams, not team-filtered)
-  const leagueData = sf === "All" ? raw : raw.filter(r => r.season === sf);
-  const { rates: lr } = buildLeagueRates(leagueData, "All");
-  const m = {};
-  f.forEach(r => { if (!m[r.name]) m[r.name] = {}; const sid = `${r.outs}_${r.bases}`; if (!m[r.name][sid]) m[r.name][sid] = { pa: 0, rbi: 0 }; m[r.name][sid].pa += r.pa; m[r.name][sid].rbi += r.rbi });
-  return { players: Object.entries(m).map(([name, data]) => ({ name, ...computeRCv(data, lr) })), leagueRates: lr };
+function computeRCv(pd,lr){
+  let tPA=0,ws=0;const sd=[];
+  S24.forEach(s=>{const pa=pd[s.id]?.pa||0,rbi=pd[s.id]?.rbi||0,lgr=lr[s.id]||0;tPA+=pa;
+    if(pa>0&&lgr>0){const pr=rbi/pa,ar=(pa*pr+K*lgr)/(pa+K);sd.push({...s,pa,rbi,playerRate:pr,adjRate:ar,leagueRate:lgr,stateScore:ar/lgr})}
+    else if(pa>0)sd.push({...s,pa,rbi,playerRate:rbi/pa,adjRate:0,leagueRate:lgr,stateScore:1.0})});
+  if(tPA===0)return{rcv:null,stateDetails:sd,totalPA:0,totalRBI:0};
+  sd.forEach(d=>{ws+=d.stateScore*(d.pa/tPA)});
+  return{rcv:ws,stateDetails:sd,totalPA:tPA,totalRBI:sd.reduce((s,d)=>s+d.rbi,0)};
 }
 
-/* ─── Components ─── */
-function RCvBar({ value, height = 8 }) { if (value === null) return null; const pct = Math.max(0, Math.min(100, ((value - .5) / 1) * 100)); return (<div style={{ width: "100%", position: "relative", height, background: C.bdr, borderRadius: height / 2 }}><div style={{ position: "absolute", left: "50%", top: 0, width: 1, height: "100%", background: `${C.mut}55` }} /><div style={{ position: "absolute", left: `${pct}%`, top: "50%", transform: "translate(-50%,-50%)", width: height + 6, height: height + 6, borderRadius: "50%", background: rc(value), border: `2px solid ${C.bg}`, boxShadow: `0 0 6px ${rc(value)}44`, transition: "left 0.4s" }} /></div>) }
-function Pill({ active, onClick, children }) { return <button onClick={onClick} style={{ padding: "8px 18px", border: "none", borderRadius: 6, background: active ? C.acc : "transparent", color: active ? "#fff" : C.dim, fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "'Barlow',sans-serif", transition: "all 0.2s", whiteSpace: "nowrap" }}>{children}</button> }
-function SPill({ active, onClick, children }) { return <button onClick={onClick} style={{ padding: "5px 12px", border: `1px solid ${active ? C.acc : C.bdr}`, borderRadius: 20, background: active ? `${C.acc}22` : "transparent", color: active ? C.acc : C.dim, fontSize: 11, fontWeight: 600, cursor: "pointer", fontFamily: mono, transition: "all 0.2s" }}>{children}</button> }
-function Loader() { return <div style={{ textAlign: "center", padding: 40 }}><div style={{ width: 32, height: 32, border: `3px solid ${C.bdr}`, borderTopColor: C.acc, borderRadius: "50%", animation: "spin 0.8s linear infinite", margin: "0 auto 12px" }} /><div style={{ color: C.dim, fontSize: 13 }}>Loading data...</div></div> }
+function aggregate(raw,sf,teamFilter){
+  const leagueData=sf==="All"?raw:raw.filter(r=>r.season===sf);
+  const lr=buildLeagueRates(leagueData,"All");
+  let f=leagueData;
+  if(teamFilter&&teamFilter!=="All")f=f.filter(r=>r.team===teamFilter);
+  const m={};f.forEach(r=>{if(!m[r.name])m[r.name]={};const sid=`${r.outs}_${r.bases}`;if(!m[r.name][sid])m[r.name][sid]={pa:0,rbi:0};m[r.name][sid].pa+=r.pa;m[r.name][sid].rbi+=r.rbi});
+  return{players:Object.entries(m).map(([name,data])=>({name,...computeRCv(data,lr)})),lr};
+}
+
+/* ─── Shared Components ─── */
+function RCvBar({value,height=8}){if(value==null)return null;const pct=Math.max(0,Math.min(100,((value-.5)/1)*100));return(<div style={{width:"100%",position:"relative",height,background:C.bdr,borderRadius:height/2}}><div style={{position:"absolute",left:"50%",top:0,width:1,height:"100%",background:`${C.mut}55`}}/><div style={{position:"absolute",left:`${pct}%`,top:"50%",transform:"translate(-50%,-50%)",width:height+6,height:height+6,borderRadius:"50%",background:rc(value),border:`2px solid ${C.bg}`,boxShadow:`0 0 6px ${rc(value)}44`,transition:"left 0.4s"}}/></div>)}
+function Pill({active,onClick,children}){return<button onClick={onClick} style={{padding:"8px 18px",border:"none",borderRadius:6,background:active?C.acc:"transparent",color:active?"#fff":C.dim,fontSize:13,fontWeight:600,cursor:"pointer",fontFamily:"'Barlow',sans-serif",transition:"all 0.2s",whiteSpace:"nowrap"}}>{children}</button>}
+function Loader(){return<div style={{textAlign:"center",padding:60}}><div style={{width:32,height:32,border:`3px solid ${C.bdr}`,borderTopColor:C.acc,borderRadius:"50%",animation:"spin 0.8s linear infinite",margin:"0 auto 12px"}}/><div style={{color:C.dim,fontSize:13}}>Loading RCv data...</div></div>}
+
+const selectStyle={padding:"8px 12px",background:C.card,border:`1px solid ${C.bdr}`,borderRadius:6,color:C.txt,fontSize:13,fontFamily:"'Barlow',sans-serif",outline:"none",cursor:"pointer",minWidth:120};
 
 /* ─── Player Profile ─── */
-function PlayerProfile({ name, rawData, seasons, playerTeam, onBack }) {
-  const team = playerTeam[name] || "";
-  const allData = rawData.filter(r => r.name === name);
+function PlayerProfile({name,rawData,playerTeam,onBack}){
+  const team=playerTeam[name]||"";
+  const allData=rawData.filter(r=>r.name===name);
+  const careerLR=useMemo(()=>buildLeagueRates(rawData,"All"),[rawData]);
+  const seasonResults=useMemo(()=>{
+    const ss=[...new Set(allData.map(r=>r.season))].sort();
+    return ss.map(s=>{const sData=allData.filter(r=>r.season===s);const m={};sData.forEach(r=>{const sid=`${r.outs}_${r.bases}`;if(!m[sid])m[sid]={pa:0,rbi:0};m[sid].pa+=r.pa;m[sid].rbi+=r.rbi});const lr=buildLeagueRates(rawData,s);return{season:s,...computeRCv(m,lr)}});
+  },[allData,rawData]);
+  const career=useMemo(()=>{const m={};allData.forEach(r=>{const sid=`${r.outs}_${r.bases}`;if(!m[sid])m[sid]={pa:0,rbi:0};m[sid].pa+=r.pa;m[sid].rbi+=r.rbi});return computeRCv(m,careerLR)},[allData,careerLR]);
+  const stateGrid=useMemo(()=>{
+    const m={};allData.forEach(r=>{const sid=`${r.outs}_${r.bases}`;if(!m[sid])m[sid]={pa:0,rbi:0};m[sid].pa+=r.pa;m[sid].rbi+=r.rbi});
+    return S24.map(s=>{const d=m[s.id]||{pa:0,rbi:0};const lgRate=careerLR[s.id]||0;const playerRate=d.pa>0?d.rbi/d.pa:0;const paPct=career.totalPA>0?d.pa/career.totalPA:0;return{...s,pa:d.pa,rbi:d.rbi,playerRate,lgRate,paPct}});
+  },[allData,career,careerLR]);
 
-  // Career league rates from all data
-  const careerLR = useMemo(() => buildLeagueRates(rawData, "All").rates, [rawData]);
+  return(<div>
+    <button onClick={onBack} style={{background:"transparent",border:`1px solid ${C.bdr}`,borderRadius:6,color:C.dim,padding:"6px 14px",fontSize:12,cursor:"pointer",fontFamily:"'Barlow',sans-serif",marginBottom:16,display:"flex",alignItems:"center",gap:6}}><span style={{fontSize:16}}>←</span> Back to Rankings</button>
 
-  const seasonResults = useMemo(() => {
-    const ss = [...new Set(allData.map(r => r.season))].sort();
-    return ss.map(s => {
-      const sData = allData.filter(r => r.season === s);
-      const m = {}; sData.forEach(r => { const sid = `${r.outs}_${r.bases}`; if (!m[sid]) m[sid] = { pa: 0, rbi: 0 }; m[sid].pa += r.pa; m[sid].rbi += r.rbi });
-      const lr = buildLeagueRates(rawData, s).rates;
-      return { season: s, ...computeRCv(m, lr) };
-    });
-  }, [allData, rawData]);
-
-  const career = useMemo(() => {
-    const m = {}; allData.forEach(r => { const sid = `${r.outs}_${r.bases}`; if (!m[sid]) m[sid] = { pa: 0, rbi: 0 }; m[sid].pa += r.pa; m[sid].rbi += r.rbi });
-    return computeRCv(m, careerLR);
-  }, [allData, careerLR]);
-
-  const stateGrid = useMemo(() => {
-    const m = {}; allData.forEach(r => { const sid = `${r.outs}_${r.bases}`; if (!m[sid]) m[sid] = { pa: 0, rbi: 0 }; m[sid].pa += r.pa; m[sid].rbi += r.rbi });
-    return S24.map(s => { const d = m[s.id] || { pa: 0, rbi: 0 }; const lgRate = careerLR[s.id] || 0; const playerRate = d.pa > 0 ? d.rbi / d.pa : 0; const paPct = career.totalPA > 0 ? d.pa / career.totalPA : 0; return { ...s, pa: d.pa, rbi: d.rbi, playerRate, lgRate, paPct } });
-  }, [allData, career, careerLR]);
-
-  return (<div>
-    <button onClick={onBack} style={{ background: "transparent", border: `1px solid ${C.bdr}`, borderRadius: 6, color: C.dim, padding: "6px 14px", fontSize: 12, cursor: "pointer", fontFamily: "'Barlow',sans-serif", marginBottom: 16, display: "flex", alignItems: "center", gap: 6 }}><span style={{ fontSize: 16 }}>←</span> Back to Rankings</button>
-    <div style={{ padding: 20, background: C.card, borderRadius: 10, border: `1px solid ${C.bdr}`, marginBottom: 16 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-        <div><div style={{ fontSize: 10, color: C.mut, textTransform: "uppercase", letterSpacing: 1.5 }}>{team}</div><h2 style={{ margin: "2px 0 0", fontSize: 24, fontWeight: 800 }}>{name}</h2></div>
-        <div style={{ textAlign: "right" }}><div style={{ fontSize: 42, fontWeight: 800, fontFamily: mono, color: rc(career.rcv), lineHeight: 1 }}>{career.rcv !== null ? career.rcv.toFixed(3) : "—"}</div><div style={{ fontSize: 12, color: rc(career.rcv), fontWeight: 600, marginTop: 2 }}>{rl(career.rcv)}</div></div>
+    {/* Header */}
+    <div style={{padding:20,background:C.card,borderRadius:10,border:`1px solid ${C.bdr}`,marginBottom:16}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:10}}>
+        <div><div style={{fontSize:10,color:C.mut,textTransform:"uppercase",letterSpacing:1.5}}>{team}</div><h2 style={{margin:"2px 0 0",fontSize:22,fontWeight:800}}>{name}</h2></div>
+        <div style={{textAlign:"right"}}><div style={{fontSize:40,fontWeight:800,fontFamily:mono,color:rc(career.rcv),lineHeight:1}}>{career.rcv!=null?career.rcv.toFixed(3):"—"}</div><div style={{fontSize:12,color:rc(career.rcv),fontWeight:600,marginTop:2}}>{rl(career.rcv)}</div></div>
       </div>
-      <div style={{ margin: "12px 0 4px" }}><RCvBar value={career.rcv} /></div>
-      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 9, color: C.mut, fontFamily: mono }}><span>0.50</span><span>1.00</span><span>1.50</span></div>
-      <div style={{ display: "flex", gap: 20, marginTop: 12, fontFamily: mono, fontSize: 12 }}>
-        <div><span style={{ color: C.mut }}>PA </span><span style={{ color: C.txt, fontWeight: 700 }}>{career.totalPA}</span></div>
-        <div><span style={{ color: C.mut }}>RBI </span><span style={{ color: C.txt, fontWeight: 700 }}>{career.totalRBI}</span></div>
-        <div><span style={{ color: C.mut }}>RBI/PA </span><span style={{ color: C.txt, fontWeight: 700 }}>{career.totalPA > 0 ? (career.totalRBI / career.totalPA * 100).toFixed(1) : 0}%</span></div>
+      <div style={{margin:"12px 0 4px"}}><RCvBar value={career.rcv}/></div>
+      <div style={{display:"flex",justifyContent:"space-between",fontSize:9,color:C.mut,fontFamily:mono}}><span>0.50</span><span>1.00</span><span>1.50</span></div>
+      <div style={{display:"flex",gap:20,marginTop:12,fontFamily:mono,fontSize:12,flexWrap:"wrap"}}>
+        <div><span style={{color:C.mut}}>PA </span><span style={{color:C.txt,fontWeight:700}}>{career.totalPA}</span></div>
+        <div><span style={{color:C.mut}}>RBI </span><span style={{color:C.txt,fontWeight:700}}>{career.totalRBI}</span></div>
+        <div><span style={{color:C.mut}}>RBI/PA </span><span style={{color:C.txt,fontWeight:700}}>{career.totalPA>0?(career.totalRBI/career.totalPA*100).toFixed(1):0}%</span></div>
       </div>
     </div>
-    {seasonResults.length > 1 && (<div style={{ padding: 16, background: C.card, borderRadius: 8, border: `1px solid ${C.bdr}`, marginBottom: 16 }}>
-      <div style={{ fontSize: 10, color: C.mut, textTransform: "uppercase", letterSpacing: 1.5, marginBottom: 10 }}>Season History</div>
-      {seasonResults.map(sr => (<div key={sr.season} style={{ display: "grid", gridTemplateColumns: "55px 1fr 55px 50px 70px", alignItems: "center", gap: 8, padding: "8px 0", borderBottom: `1px solid ${C.bg}`, fontFamily: mono, fontSize: 12 }}>
-        <div style={{ color: C.txt, fontWeight: 700 }}>{sr.season}</div><RCvBar value={sr.rcv} height={5} /><div style={{ textAlign: "right", color: C.dim }}>{sr.totalPA} PA</div><div style={{ textAlign: "right", color: C.dim }}>{sr.totalRBI} RBI</div><div style={{ textAlign: "right", color: rc(sr.rcv), fontWeight: 700 }}>{sr.rcv?.toFixed(3) || "—"}</div>
+
+    {/* Season history */}
+    {seasonResults.length>1&&(<div style={{padding:16,background:C.card,borderRadius:8,border:`1px solid ${C.bdr}`,marginBottom:16}}>
+      <div style={{fontSize:10,color:C.mut,textTransform:"uppercase",letterSpacing:1.5,marginBottom:10}}>Season History</div>
+      {seasonResults.map(sr=>(<div key={sr.season} style={{display:"grid",gridTemplateColumns:"55px 1fr 55px 50px 70px",alignItems:"center",gap:8,padding:"8px 0",borderBottom:`1px solid ${C.bg}`,fontFamily:mono,fontSize:12}}>
+        <div style={{color:C.txt,fontWeight:700}}>{sr.season}</div><RCvBar value={sr.rcv} height={5}/><div style={{textAlign:"right",color:C.dim}}>{sr.totalPA} PA</div><div style={{textAlign:"right",color:C.dim}}>{sr.totalRBI} RBI</div><div style={{textAlign:"right",color:rc(sr.rcv),fontWeight:700}}>{sr.rcv?.toFixed(3)||"—"}</div>
       </div>))}
     </div>)}
-    <div style={{ padding: 16, background: C.card, borderRadius: 8, border: `1px solid ${C.bdr}`, marginBottom: 16 }}>
-      <div style={{ fontSize: 10, color: C.mut, textTransform: "uppercase", letterSpacing: 1.5, marginBottom: 10 }}>Situational Breakdown — All 24 Base-Out States</div>
-      <div style={{ overflowX: "auto" }}><table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11, fontFamily: mono }}>
-        <thead><tr style={{ borderBottom: `1px solid ${C.bdr}`, color: C.mut, textTransform: "uppercase", fontSize: 9, letterSpacing: 1 }}>
-          <th style={{ padding: "6px 6px", textAlign: "left" }}>State</th><th style={{ padding: "6px 6px", textAlign: "right" }}>PA</th><th style={{ padding: "6px 6px", textAlign: "right" }}>% of PA</th><th style={{ padding: "6px 6px", textAlign: "right" }}>RBI</th><th style={{ padding: "6px 6px", textAlign: "right" }}>RBI Rate</th><th style={{ padding: "6px 6px", textAlign: "right" }}>Lg Avg</th><th style={{ padding: "6px 6px", textAlign: "right" }}>vs Avg</th>
+
+    {/* 24-state table */}
+    <div style={{padding:16,background:C.card,borderRadius:8,border:`1px solid ${C.bdr}`,marginBottom:16}}>
+      <div style={{fontSize:10,color:C.mut,textTransform:"uppercase",letterSpacing:1.5,marginBottom:10}}>Situational Breakdown</div>
+      <div style={{overflowX:"auto"}}><table style={{width:"100%",borderCollapse:"collapse",fontSize:11,fontFamily:mono}}>
+        <thead><tr style={{borderBottom:`1px solid ${C.bdr}`,color:C.mut,textTransform:"uppercase",fontSize:9,letterSpacing:1}}>
+          <th style={{padding:"6px",textAlign:"left"}}>State</th><th style={{padding:"6px",textAlign:"right"}}>PA</th><th style={{padding:"6px",textAlign:"right"}}>% of PA</th><th style={{padding:"6px",textAlign:"right"}}>RBI</th><th style={{padding:"6px",textAlign:"right"}}>Rate</th><th style={{padding:"6px",textAlign:"right"}}>Lg Avg</th><th style={{padding:"6px",textAlign:"right"}}>vs Avg</th>
         </tr></thead>
-        <tbody>{stateGrid.filter(s => s.pa > 0).sort((a, b) => b.pa - a.pa).map(s => {
-          const diff = s.lgRate > 0 ? (s.playerRate / s.lgRate - 1) * 100 : 0; const diffColor = diff > 5 ? C.grn : diff > -5 ? C.yel : C.red;
-          return (<tr key={s.id} style={{ borderBottom: `1px solid ${C.bg}` }}>
-            <td style={{ padding: "5px 6px", color: C.txt }}>{s.outs} out, {s.baseLabel}</td><td style={{ padding: "5px 6px", textAlign: "right", color: C.dim }}>{s.pa}</td><td style={{ padding: "5px 6px", textAlign: "right", color: C.dim }}>{(s.paPct * 100).toFixed(1)}%</td><td style={{ padding: "5px 6px", textAlign: "right", color: C.txt, fontWeight: 600 }}>{s.rbi}</td><td style={{ padding: "5px 6px", textAlign: "right", color: C.txt }}>{(s.playerRate * 100).toFixed(1)}%</td><td style={{ padding: "5px 6px", textAlign: "right", color: C.mut }}>{(s.lgRate * 100).toFixed(1)}%</td><td style={{ padding: "5px 6px", textAlign: "right", color: diffColor, fontWeight: 700 }}>{diff >= 0 ? "+" : ""}{diff.toFixed(1)}%</td>
-          </tr>)
-        })}</tbody>
+        <tbody>{stateGrid.filter(s=>s.pa>0).sort((a,b)=>b.pa-a.pa).map(s=>{
+          const diff=s.lgRate>0?(s.playerRate/s.lgRate-1)*100:0;const dc=diff>5?C.grn:diff>-5?C.yel:C.red;
+          return(<tr key={s.id} style={{borderBottom:`1px solid ${C.bg}`}}>
+            <td style={{padding:"5px 6px",color:C.txt,whiteSpace:"nowrap"}}>{s.outs}out, {s.baseLabel}</td>
+            <td style={{padding:"5px 6px",textAlign:"right",color:C.dim}}>{s.pa}</td>
+            <td style={{padding:"5px 6px",textAlign:"right",color:C.dim}}>{(s.paPct*100).toFixed(1)}%</td>
+            <td style={{padding:"5px 6px",textAlign:"right",color:C.txt,fontWeight:600}}>{s.rbi}</td>
+            <td style={{padding:"5px 6px",textAlign:"right",color:C.txt}}>{(s.playerRate*100).toFixed(1)}%</td>
+            <td style={{padding:"5px 6px",textAlign:"right",color:C.mut}}>{(s.lgRate*100).toFixed(1)}%</td>
+            <td style={{padding:"5px 6px",textAlign:"right",color:dc,fontWeight:700}}>{diff>=0?"+":""}{diff.toFixed(1)}%</td>
+          </tr>)})}</tbody>
       </table></div>
     </div>
-    <div style={{ padding: 16, background: C.card, borderRadius: 8, border: `1px solid ${C.bdr}`, marginBottom: 16 }}>
-      <div style={{ fontSize: 10, color: C.mut, textTransform: "uppercase", letterSpacing: 1.5, marginBottom: 10 }}>RBI Rate vs League Average — Heatmap</div>
-      <div style={{ overflowX: "auto" }}><table style={{ width: "100%", borderCollapse: "collapse", fontSize: 10, fontFamily: mono }}>
-        <thead><tr><th style={{ padding: 5, color: C.mut }}>Outs</th>{BASES.map(b => <th key={b.key} style={{ padding: 5, textAlign: "center", color: C.mut }}>{b.short}</th>)}</tr></thead>
-        <tbody>{OUTS.map(o => (<tr key={o}><td style={{ padding: 5, color: C.txt, fontWeight: 600 }}>{o}</td>{BASES.map(b => { const sid = `${o}_${b.key}`; const sg = stateGrid.find(s => s.id === sid); if (!sg || sg.pa === 0) return <td key={b.key} style={{ padding: 5, textAlign: "center", color: C.mut, background: `${C.bdr}44` }}>—</td>; const diff = sg.lgRate > 0 ? (sg.playerRate / sg.lgRate - 1) : 0; const bg = diff > 0.15 ? `${C.grn}33` : diff > 0 ? `${C.grn}18` : diff > -0.15 ? `${C.red}18` : `${C.red}33`; return <td key={b.key} style={{ padding: 5, textAlign: "center", color: C.txt, background: bg, fontWeight: 600 }}>{(sg.playerRate * 100).toFixed(1)}%</td> })}</tr>))}</tbody>
+
+    {/* Heatmap */}
+    <div style={{padding:16,background:C.card,borderRadius:8,border:`1px solid ${C.bdr}`,marginBottom:16}}>
+      <div style={{fontSize:10,color:C.mut,textTransform:"uppercase",letterSpacing:1.5,marginBottom:10}}>RBI Rate Heatmap vs League Average</div>
+      <div style={{overflowX:"auto"}}><table style={{width:"100%",borderCollapse:"collapse",fontSize:10,fontFamily:mono}}>
+        <thead><tr><th style={{padding:5,color:C.mut}}>Outs</th>{BASES.map(b=><th key={b.key} style={{padding:5,textAlign:"center",color:C.mut}}>{b.short}</th>)}</tr></thead>
+        <tbody>{OUTS.map(o=>(<tr key={o}><td style={{padding:5,color:C.txt,fontWeight:600}}>{o}</td>{BASES.map(b=>{const sid=`${o}_${b.key}`;const sg=stateGrid.find(s=>s.id===sid);if(!sg||sg.pa===0)return<td key={b.key} style={{padding:5,textAlign:"center",color:C.mut,background:`${C.bdr}44`}}>—</td>;const diff=sg.lgRate>0?(sg.playerRate/sg.lgRate-1):0;const bg=diff>0.15?`${C.grn}33`:diff>0?`${C.grn}18`:diff>-0.15?`${C.red}18`:`${C.red}33`;return<td key={b.key} style={{padding:5,textAlign:"center",color:C.txt,background:bg,fontWeight:600}}>{(sg.playerRate*100).toFixed(1)}%</td>})}</tr>))}</tbody>
       </table></div>
-      <div style={{ display: "flex", gap: 12, marginTop: 8, fontSize: 10, color: C.mut, justifyContent: "center" }}>
-        <span><span style={{ display: "inline-block", width: 10, height: 10, borderRadius: 2, background: `${C.grn}33`, marginRight: 4, verticalAlign: "middle" }} /> Above avg</span>
-        <span><span style={{ display: "inline-block", width: 10, height: 10, borderRadius: 2, background: `${C.red}33`, marginRight: 4, verticalAlign: "middle" }} /> Below avg</span>
-        <span><span style={{ display: "inline-block", width: 10, height: 10, borderRadius: 2, background: `${C.bdr}44`, marginRight: 4, verticalAlign: "middle" }} /> No data</span>
+      <div style={{display:"flex",gap:12,marginTop:8,fontSize:10,color:C.mut,justifyContent:"center"}}>
+        <span><span style={{display:"inline-block",width:10,height:10,borderRadius:2,background:`${C.grn}33`,marginRight:4,verticalAlign:"middle"}}/> Above</span>
+        <span><span style={{display:"inline-block",width:10,height:10,borderRadius:2,background:`${C.red}33`,marginRight:4,verticalAlign:"middle"}}/> Below</span>
+        <span><span style={{display:"inline-block",width:10,height:10,borderRadius:2,background:`${C.bdr}44`,marginRight:4,verticalAlign:"middle"}}/> No data</span>
       </div>
     </div>
   </div>);
 }
 
 /* ─── Rankings Page ─── */
-function RankingsPage({ onSelectPlayer, parsedData, setParsedData }) {
-  const [activeSeason, setActiveSeason] = useState("All");
-  const [activeTeam, setActiveTeam] = useState("All");
-  const [sortField, setSortField] = useState("rcv");
-  const [sortDir, setSortDir] = useState("desc");
-  const [search, setSearch] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [loadError, setLoadError] = useState(null);
-  const fileRef = useRef();
+function RankingsPage({onSelectPlayer,parsedData}){
+  const[activeSeason,setActiveSeason]=useState("All");
+  const[activeTeam,setActiveTeam]=useState("All");
+  const[sortField,setSortField]=useState("rcv");
+  const[sortDir,setSortDir]=useState("desc");
+  const[search,setSearch]=useState("");
 
-  useEffect(() => {
-    if (parsedData) return;
-    setLoading(true);
-    fetch("rcv_data.csv")
-      .then(r => { if (!r.ok) throw new Error(r.status); return r.text() })
-      .then(text => { const p = parseCSV(text); if (p && p.raw.length) setParsedData(p); else setLoadError("CSV parsed but no valid data found."); setLoading(false) })
-      .catch(e => { setLoadError("No rcv_data.csv found. Upload a CSV below."); setLoading(false) });
-  }, []);
+  const{players:results}=useMemo(()=>parsedData?aggregate(parsedData.raw,activeSeason,activeTeam):{players:[]},[parsedData,activeSeason,activeTeam]);
 
-  const handleFile = useCallback(e => {
-    const file = e.target?.files?.[0] || e.dataTransfer?.files?.[0]; if (!file) return;
-    setActiveSeason("All"); setActiveTeam("All"); setLoadError(null);
-    const reader = new FileReader();
-    reader.onload = ev => { const p = parseCSV(ev.target.result); if (p) setParsedData(p) };
-    reader.readAsText(file);
-  }, []);
+  // Filter out 0 PA players
+  const withData=useMemo(()=>results.filter(p=>p.totalPA>0),[results]);
 
-  const { players: results, leagueRates } = useMemo(() => parsedData ? aggregate(parsedData.raw, activeSeason, activeTeam) : { players: [], leagueRates: {} }, [parsedData, activeSeason, activeTeam]);
-  const sorted = useMemo(() => {
-    let f = results; if (search) f = f.filter(p => p.name.toLowerCase().includes(search.toLowerCase()));
-    return [...f].sort((a, b) => { const av = sortField === "name" ? a.name : sortField === "totalPA" ? a.totalPA : sortField === "totalRBI" ? a.totalRBI : (a.rcv || 0); const bv = sortField === "name" ? b.name : sortField === "totalPA" ? b.totalPA : sortField === "totalRBI" ? b.totalRBI : (b.rcv || 0); if (typeof av === "string") return sortDir === "asc" ? av.localeCompare(bv) : bv.localeCompare(av); return sortDir === "asc" ? av - bv : bv - av });
-  }, [results, search, sortField, sortDir]);
+  const sorted=useMemo(()=>{
+    let f=withData;if(search)f=f.filter(p=>p.name.toLowerCase().includes(search.toLowerCase()));
+    return[...f].sort((a,b)=>{const av=sortField==="name"?a.name:sortField==="totalPA"?a.totalPA:sortField==="totalRBI"?a.totalRBI:(a.rcv||0);const bv=sortField==="name"?b.name:sortField==="totalPA"?b.totalPA:sortField==="totalRBI"?b.totalRBI:(b.rcv||0);if(typeof av==="string")return sortDir==="asc"?av.localeCompare(bv):bv.localeCompare(av);return sortDir==="asc"?av-bv:bv-av});
+  },[withData,search,sortField,sortDir]);
 
-  const toggleSort = f => { if (sortField === f) setSortDir(d => d === "asc" ? "desc" : "asc"); else { setSortField(f); setSortDir(f === "name" ? "asc" : "desc") } };
-  const Arrow = ({ f }) => sortField !== f ? <span style={{ color: C.mut, opacity: .3 }}>↕</span> : <span style={{ color: C.acc }}>{sortDir === "asc" ? "↑" : "↓"}</span>;
+  const toggleSort=f=>{if(sortField===f)setSortDir(d=>d==="asc"?"desc":"asc");else{setSortField(f);setSortDir(f==="name"?"asc":"desc")}};
+  const Arrow=({f})=>sortField!==f?<span style={{color:C.mut,opacity:.3}}>↕</span>:<span style={{color:C.acc}}>{sortDir==="asc"?"↑":"↓"}</span>;
 
-  if (loading) return <Loader />;
-  const seasons = parsedData?.seasons || [];
-  const teams = parsedData?.teams || [];
-  const playerTeam = parsedData?.playerTeam || {};
+  if(!parsedData)return null;
+  const{seasons,teams,playerTeam}=parsedData;
 
-  return (<div>
-    <div onDrop={e => { e.preventDefault(); handleFile(e) }} onDragOver={e => e.preventDefault()} onClick={() => fileRef.current?.click()}
-      style={{ padding: 14, border: `1px dashed ${C.bdr}`, borderRadius: 8, textAlign: "center", cursor: "pointer", background: C.card, marginBottom: 14, display: "flex", alignItems: "center", justifyContent: "center", gap: 10 }}
-      onMouseEnter={e => e.currentTarget.style.borderColor = C.acc} onMouseLeave={e => e.currentTarget.style.borderColor = C.bdr}>
-      <input ref={fileRef} type="file" accept=".csv" onChange={handleFile} style={{ display: "none" }} />
-      <span style={{ fontSize: 16 }}>📄</span><span style={{ color: C.dim, fontSize: 12 }}>Upload a different CSV</span>
-      <span style={{ color: C.mut, fontSize: 10, fontFamily: mono }}>player, team, season, outs, bases, pa, rbi</span>
+  return(<div>
+    {/* Filters row */}
+    <div style={{display:"flex",gap:12,marginBottom:16,flexWrap:"wrap",alignItems:"flex-end"}}>
+      <div>
+        <label style={{fontSize:10,color:C.mut,textTransform:"uppercase",letterSpacing:1.5,display:"block",marginBottom:4}}>Season</label>
+        <select value={activeSeason} onChange={e=>setActiveSeason(e.target.value)} style={selectStyle}>
+          <option value="All">{seasons.length>1?"Career (All)":"All"}</option>
+          {seasons.map(s=><option key={s} value={s}>{s}</option>)}
+        </select>
+      </div>
+      <div>
+        <label style={{fontSize:10,color:C.mut,textTransform:"uppercase",letterSpacing:1.5,display:"block",marginBottom:4}}>Team</label>
+        <select value={activeTeam} onChange={e=>setActiveTeam(e.target.value)} style={selectStyle}>
+          <option value="All">All Teams</option>
+          {teams.map(t=><option key={t} value={t}>{t}</option>)}
+        </select>
+      </div>
+      <div style={{flex:1,minWidth:180}}>
+        <label style={{fontSize:10,color:C.mut,textTransform:"uppercase",letterSpacing:1.5,display:"block",marginBottom:4}}>Search</label>
+        <input type="text" value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search players..."
+          style={{width:"100%",padding:"8px 12px",background:C.card,border:`1px solid ${C.bdr}`,borderRadius:6,color:C.txt,fontSize:13,fontFamily:"'Barlow',sans-serif",outline:"none"}}/>
+      </div>
     </div>
-    {loadError && !parsedData && <div style={{ padding: 14, background: C.ylBg, border: `1px solid ${C.yel}33`, borderRadius: 6, fontSize: 12, color: C.yel, marginBottom: 14, textAlign: "center" }}>{loadError}</div>}
-    {parsedData && (<div>
-      <div style={{ display: "flex", gap: 16, marginBottom: 14, flexWrap: "wrap" }}>
-        {seasons.length > 0 && (<div>
-          <div style={{ fontSize: 10, color: C.mut, textTransform: "uppercase", letterSpacing: 1.5, marginBottom: 5 }}>Season</div>
-          <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
-            <SPill active={activeSeason === "All"} onClick={() => setActiveSeason("All")}>{seasons.length > 1 ? "Career" : "All"}</SPill>
-            {seasons.map(s => <SPill key={s} active={activeSeason === s} onClick={() => setActiveSeason(s)}>{s}</SPill>)}
-          </div>
-        </div>)}
-        {teams.length > 0 && (<div>
-          <div style={{ fontSize: 10, color: C.mut, textTransform: "uppercase", letterSpacing: 1.5, marginBottom: 5 }}>Team</div>
-          <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
-            <SPill active={activeTeam === "All"} onClick={() => setActiveTeam("All")}>All</SPill>
-            {teams.map(t => <SPill key={t} active={activeTeam === t} onClick={() => setActiveTeam(t)}>{t}</SPill>)}
-          </div>
-        </div>)}
-      </div>
-      <input type="text" value={search} onChange={e => setSearch(e.target.value)} placeholder="Search players..."
-        style={{ width: "100%", padding: "9px 14px", background: C.bg, border: `1px solid ${C.bdr}`, borderRadius: 6, color: C.txt, fontSize: 13, outline: "none", marginBottom: 12 }} />
-      <div style={{ fontSize: 10, color: C.mut, textTransform: "uppercase", letterSpacing: 1.5, marginBottom: 8 }}>{sorted.length} Players</div>
-      <div style={{ maxHeight: 500, overflowY: "auto" }}>
-        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12, fontFamily: mono }}>
-          <thead><tr style={{ borderBottom: `1px solid ${C.bdr}`, color: C.mut, position: "sticky", top: 0, background: C.card, zIndex: 1 }}>
-            <th style={{ padding: "7px 6px", textAlign: "left", width: 28, fontWeight: 600 }}>#</th>
-            <th style={{ padding: "7px 6px", textAlign: "left", cursor: "pointer", fontWeight: 600 }} onClick={() => toggleSort("name")}>Player <Arrow f="name" /></th>
-            {teams.length > 0 && <th style={{ padding: "7px 6px", textAlign: "left", fontWeight: 600, width: 40 }}>Team</th>}
-            <th style={{ padding: "7px 6px", textAlign: "right", cursor: "pointer", fontWeight: 600 }} onClick={() => toggleSort("totalPA")}>PA <Arrow f="totalPA" /></th>
-            <th style={{ padding: "7px 6px", textAlign: "right", cursor: "pointer", fontWeight: 600 }} onClick={() => toggleSort("totalRBI")}>RBI <Arrow f="totalRBI" /></th>
-            <th style={{ padding: "7px 6px", textAlign: "right", cursor: "pointer", fontWeight: 600 }} onClick={() => toggleSort("rcv")}>RCv <Arrow f="rcv" /></th>
-            <th style={{ padding: "7px 6px", width: 100 }}></th>
-          </tr></thead>
-          <tbody>{sorted.map((p, i) => (
-            <tr key={p.name} onClick={() => onSelectPlayer(p.name)}
-              style={{ borderBottom: `1px solid ${C.bg}`, cursor: "pointer", transition: "background 0.15s" }}
-              onMouseEnter={e => e.currentTarget.style.background = C.cardH} onMouseLeave={e => e.currentTarget.style.background = "transparent"}>
-              <td style={{ padding: "7px 6px", color: i < 3 ? C.acc : C.mut, fontSize: i < 3 ? 13 : 10, fontWeight: i < 3 ? 800 : 400 }}>{i + 1}</td>
-              <td style={{ padding: "7px 6px", color: C.txt, fontWeight: 500 }}>{p.name}</td>
-              {teams.length > 0 && <td style={{ padding: "7px 6px", color: C.dim, fontSize: 10 }}>{playerTeam[p.name] || ""}</td>}
-              <td style={{ padding: "7px 6px", textAlign: "right", color: C.dim }}>{p.totalPA}</td>
-              <td style={{ padding: "7px 6px", textAlign: "right", color: C.dim }}>{p.totalRBI}</td>
-              <td style={{ padding: "7px 6px", textAlign: "right", color: rc(p.rcv), fontWeight: 700 }}>{p.rcv !== null ? p.rcv.toFixed(3) : "—"}</td>
-              <td style={{ padding: "7px 6px" }}><RCvBar value={p.rcv} height={5} /></td>
-            </tr>
-          ))}</tbody>
-        </table>
-      </div>
-    </div>)}
+
+    <div style={{fontSize:10,color:C.mut,textTransform:"uppercase",letterSpacing:1.5,marginBottom:8}}>{sorted.length} Players</div>
+
+    <div style={{maxHeight:560,overflowY:"auto",borderRadius:8,border:`1px solid ${C.bdr}`}}>
+      <table style={{width:"100%",borderCollapse:"collapse",fontSize:12,fontFamily:mono}}>
+        <thead><tr style={{borderBottom:`1px solid ${C.bdr}`,color:C.mut,position:"sticky",top:0,background:C.card,zIndex:1}}>
+          <th style={{padding:"8px 8px",textAlign:"left",width:32,fontWeight:600}}>#</th>
+          <th style={{padding:"8px 8px",textAlign:"left",cursor:"pointer",fontWeight:600}} onClick={()=>toggleSort("name")}>Player <Arrow f="name"/></th>
+          <th style={{padding:"8px 8px",textAlign:"left",fontWeight:600,width:44}}>Team</th>
+          <th style={{padding:"8px 8px",textAlign:"right",cursor:"pointer",fontWeight:600}} onClick={()=>toggleSort("totalPA")}>PA <Arrow f="totalPA"/></th>
+          <th style={{padding:"8px 8px",textAlign:"right",cursor:"pointer",fontWeight:600}} onClick={()=>toggleSort("totalRBI")}>RBI <Arrow f="totalRBI"/></th>
+          <th style={{padding:"8px 8px",textAlign:"right",cursor:"pointer",fontWeight:600,width:70}} onClick={()=>toggleSort("rcv")}>RCv <Arrow f="rcv"/></th>
+          <th style={{padding:"8px 8px",width:100}}></th>
+        </tr></thead>
+        <tbody>{sorted.map((p,i)=>(
+          <tr key={p.name} onClick={()=>onSelectPlayer(p.name)}
+            style={{borderBottom:`1px solid ${C.bg}`,cursor:"pointer",transition:"background 0.15s"}}
+            onMouseEnter={e=>e.currentTarget.style.background=C.cardH} onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
+            <td style={{padding:"8px 8px",color:i<3?C.acc:C.mut,fontSize:i<3?13:10,fontWeight:i<3?800:400}}>{i+1}</td>
+            <td style={{padding:"8px 8px",color:C.txt,fontWeight:500,maxWidth:200,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.name}</td>
+            <td style={{padding:"8px 8px",color:C.dim,fontSize:10}}>{playerTeam[p.name]||""}</td>
+            <td style={{padding:"8px 8px",textAlign:"right",color:C.dim}}>{p.totalPA}</td>
+            <td style={{padding:"8px 8px",textAlign:"right",color:C.dim}}>{p.totalRBI}</td>
+            <td style={{padding:"8px 8px",textAlign:"right",color:rc(p.rcv),fontWeight:700}}>{p.rcv!=null?p.rcv.toFixed(3):"—"}</td>
+            <td style={{padding:"8px 8px"}}><RCvBar value={p.rcv} height={5}/></td>
+          </tr>
+        ))}</tbody>
+      </table>
+    </div>
   </div>);
 }
 
 /* ─── About ─── */
-function AboutPage() {
-  return (<div style={{ fontSize: 13, color: C.txt, lineHeight: 1.8 }}>
-    <h3 style={{ fontWeight: 700, fontSize: 16, margin: "0 0 14px" }}>What is RCv?</h3>
-    <p style={{ color: C.dim, marginBottom: 16 }}>Run Conversion Value measures how well a batter drives in runs compared to the league average, after adjusting for the specific base-out situations they face. It removes the bias of lineup position and teammate OBP to isolate actual run-producing ability.</p>
-    <div style={{ padding: 16, background: C.card, borderRadius: 8, border: `1px solid ${C.bdr}`, marginBottom: 14, fontFamily: mono, fontSize: 12, lineHeight: 2 }}>
-      <div><span style={{ color: C.acc }}>adj_rate(s)</span> = (PA(s) × rate(s) + k × lg_rate(s)) / (PA(s) + k)</div>
-      <div><span style={{ color: C.acc }}>state_score(s)</span> = adj_rate(s) / lg_rate(s)</div>
-      <div><span style={{ color: C.acc }}>RCv</span> = Σ( state_score(s) × PA(s) / total_PA )</div>
+function AboutPage(){
+  return(<div style={{fontSize:13,color:C.txt,lineHeight:1.8}}>
+    <h3 style={{fontWeight:700,fontSize:16,margin:"0 0 14px"}}>What is RCv?</h3>
+    <p style={{color:C.dim,marginBottom:16}}>Run Conversion Value measures how well a batter drives in runs compared to the league average, after adjusting for the specific base-out situations they face. It removes the bias of lineup position and teammate OBP to isolate actual run-producing ability.</p>
+    <div style={{padding:16,background:C.card,borderRadius:8,border:`1px solid ${C.bdr}`,marginBottom:14,fontFamily:mono,fontSize:12,lineHeight:2}}>
+      <div><span style={{color:C.acc}}>adj_rate(s)</span> = (PA(s) × rate(s) + k × lg_rate(s)) / (PA(s) + k)</div>
+      <div><span style={{color:C.acc}}>state_score(s)</span> = adj_rate(s) / lg_rate(s)</div>
+      <div><span style={{color:C.acc}}>RCv</span> = Σ( state_score(s) × PA(s) / total_PA )</div>
     </div>
-    <p style={{ color: C.dim, marginBottom: 12 }}>Every plate appearance happens in one of 24 base-out states. For each, RCv compares the player's RBI rate to the league average and applies Bayesian shrinkage (k=50) to stabilize small samples. League averages are calculated dynamically from the loaded dataset.</p>
-    <div style={{ padding: 14, background: C.card, borderRadius: 8, border: `1px solid ${C.bdr}`, marginBottom: 14 }}>
-      <div style={{ fontSize: 10, color: C.mut, textTransform: "uppercase", letterSpacing: 1.5, marginBottom: 8 }}>Scale</div>
-      {[{ min: "1.15+", label: "Elite", color: C.grn }, { min: "1.05–1.15", label: "Above Avg", color: "#86efac" }, { min: "0.95–1.05", label: "Average", color: C.yel }, { min: "0.85–0.95", label: "Below Avg", color: C.org }, { min: "< 0.85", label: "Poor", color: C.red }].map(r => (
-        <div key={r.label} style={{ display: "flex", alignItems: "center", gap: 10, padding: "5px 0", borderBottom: `1px solid ${C.bg}` }}>
-          <div style={{ width: 8, height: 8, borderRadius: "50%", background: r.color, flexShrink: 0 }} /><div style={{ fontFamily: mono, fontSize: 11, color: C.dim, width: 70 }}>{r.min}</div><div style={{ fontWeight: 600, color: r.color, fontSize: 12 }}>{r.label}</div>
+    <p style={{color:C.dim,marginBottom:12}}>Every plate appearance happens in one of 24 base-out states (8 base configs × 3 out states). For each, RCv compares the player's RBI rate to the league average and applies Bayesian shrinkage (k=50) to stabilize small samples. League averages are calculated dynamically from the loaded dataset, so they're always accurate to the data.</p>
+    <h4 style={{fontWeight:700,fontSize:14,margin:"16px 0 8px"}}>How It Differs from RE24</h4>
+    <p style={{color:C.dim,marginBottom:12}}>RE24 measures total run expectancy change — walks, advancing runners, the batter scoring later. RCv is intentionally narrow: did this batter drive in runs at a rate above or below average for the situations faced? A sacrifice fly loses value in RE24 (it's an out) but gains credit in RCv (it drove in a run).</p>
+    <div style={{padding:14,background:C.card,borderRadius:8,border:`1px solid ${C.bdr}`,marginBottom:14}}>
+      <div style={{fontSize:10,color:C.mut,textTransform:"uppercase",letterSpacing:1.5,marginBottom:8}}>Scale</div>
+      {[{min:"1.15+",label:"Elite",color:C.grn},{min:"1.05–1.15",label:"Above Avg",color:"#86efac"},{min:"0.95–1.05",label:"Average",color:C.yel},{min:"0.85–0.95",label:"Below Avg",color:C.org},{min:"< 0.85",label:"Poor",color:C.red}].map(r=>(
+        <div key={r.label} style={{display:"flex",alignItems:"center",gap:10,padding:"5px 0",borderBottom:`1px solid ${C.bg}`}}>
+          <div style={{width:8,height:8,borderRadius:"50%",background:r.color,flexShrink:0}}/><div style={{fontFamily:mono,fontSize:11,color:C.dim,width:70}}>{r.min}</div><div style={{fontWeight:600,color:r.color,fontSize:12}}>{r.label}</div>
         </div>
       ))}
     </div>
-    <p style={{ color: C.dim }}>Data sourced from MLB Statcast via Baseball Savant (baseballsavant.mlb.com).</p>
+    <p style={{color:C.dim}}>Data sourced from MLB Statcast via Baseball Savant (baseballsavant.mlb.com).</p>
   </div>);
 }
 
 /* ─── App ─── */
-function App() {
-  const [page, setPage] = useState("rankings");
-  const [selectedPlayer, setSelectedPlayer] = useState(null);
-  const [parsedData, setParsedData] = useState(null);
+function App(){
+  const[page,setPage]=useState("rankings");
+  const[selectedPlayer,setSelectedPlayer]=useState(null);
+  const[parsedData,setParsedData]=useState(null);
+  const[loading,setLoading]=useState(true);
+  const[error,setError]=useState(null);
 
-  if (selectedPlayer && parsedData) {
-    return (<div style={{ minHeight: "100vh", padding: "20px 12px" }}><div style={{ maxWidth: 700, margin: "0 auto" }}>
-      <div style={{ marginBottom: 20, display: "flex", alignItems: "center", gap: 10 }}>
-        <div style={{ width: 38, height: 38, borderRadius: 10, background: "linear-gradient(135deg,#4f8aff,#7c3aed)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15, fontWeight: 800, fontFamily: mono, color: "#fff" }}>RCv</div>
-        <h1 style={{ margin: 0, fontSize: 20, fontWeight: 800, letterSpacing: -0.5 }}>Run Conversion Value</h1>
-      </div>
-      <PlayerProfile name={selectedPlayer} rawData={parsedData.raw} seasons={parsedData.seasons} playerTeam={parsedData.playerTeam} onBack={() => setSelectedPlayer(null)} />
-      <div style={{ marginTop: 32, paddingTop: 16, borderTop: `1px solid ${C.bdr}`, textAlign: "center", fontSize: 11, color: C.mut }}>RCv — Created by Clayton Jones · Data via MLB Statcast</div>
+  useEffect(()=>{
+    fetch("rcv_data.csv")
+      .then(r=>{if(!r.ok)throw new Error("File not found");return r.text()})
+      .then(text=>{const p=parseCSV(text);if(p&&p.raw.length)setParsedData(p);else setError("Could not parse data.");setLoading(false)})
+      .catch(()=>{setError("rcv_data.csv not found. Make sure it's in the same folder as index.html.");setLoading(false)});
+  },[]);
+
+  const header=(<div style={{marginBottom:20,display:"flex",alignItems:"center",gap:10,justifyContent:selectedPlayer?"flex-start":"center",flexDirection:selectedPlayer?"row":"column"}}>
+    <div style={{display:"flex",alignItems:"center",gap:10}}>
+      <div style={{width:selectedPlayer?38:42,height:selectedPlayer?38:42,borderRadius:selectedPlayer?10:12,background:"linear-gradient(135deg,#4f8aff,#7c3aed)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:selectedPlayer?15:16,fontWeight:800,fontFamily:mono,color:"#fff"}}>RCv</div>
+      <h1 style={{margin:0,fontSize:selectedPlayer?20:24,fontWeight:selectedPlayer?800:900,letterSpacing:selectedPlayer?-0.5:-1}}>Run Conversion Value</h1>
+    </div>
+    {!selectedPlayer&&<p style={{margin:0,fontSize:12,color:C.dim,maxWidth:480,textAlign:"center"}}>Situation-adjusted RBI efficiency across 24 base-out states. Click any player for detailed insights.</p>}
+  </div>);
+
+  if(loading)return<div style={{minHeight:"100vh",padding:"20px 12px"}}><div style={{maxWidth:700,margin:"0 auto"}}>{header}<Loader/></div></div>;
+  if(error)return<div style={{minHeight:"100vh",padding:"20px 12px"}}><div style={{maxWidth:700,margin:"0 auto"}}>{header}<div style={{padding:20,background:C.ylBg,border:`1px solid ${C.yel}33`,borderRadius:8,color:C.yel,textAlign:"center"}}>{error}</div></div></div>;
+
+  if(selectedPlayer&&parsedData){
+    return(<div style={{minHeight:"100vh",padding:"20px 12px"}}><div style={{maxWidth:700,margin:"0 auto"}}>
+      {header}
+      <PlayerProfile name={selectedPlayer} rawData={parsedData.raw} playerTeam={parsedData.playerTeam} onBack={()=>setSelectedPlayer(null)}/>
+      <div style={{marginTop:32,paddingTop:16,borderTop:`1px solid ${C.bdr}`,textAlign:"center",fontSize:11,color:C.mut}}>RCv — Created by Clayton Jones · Data via MLB Statcast</div>
     </div></div>);
   }
 
-  return (<div style={{ minHeight: "100vh", padding: "20px 12px" }}><div style={{ maxWidth: 700, margin: "0 auto" }}>
-    <div style={{ marginBottom: 20, textAlign: "center" }}>
-      <div style={{ display: "inline-flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
-        <div style={{ width: 42, height: 42, borderRadius: 12, background: "linear-gradient(135deg,#4f8aff,#7c3aed)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, fontWeight: 800, fontFamily: mono, color: "#fff" }}>RCv</div>
-        <h1 style={{ margin: 0, fontSize: 24, fontWeight: 900, letterSpacing: -1 }}>Run Conversion Value</h1>
-      </div>
-      <p style={{ margin: 0, fontSize: 12, color: C.dim, maxWidth: 480, marginLeft: "auto", marginRight: "auto" }}>Situation-adjusted RBI efficiency across 24 base-out states. Click any player for detailed insights.</p>
-    </div>
-    <div style={{ display: "flex", gap: 2, padding: 3, background: C.card, borderRadius: 8, border: `1px solid ${C.bdr}`, marginBottom: 18, justifyContent: "center" }}>
-      <Pill active={page === "rankings"} onClick={() => setPage("rankings")}>Rankings</Pill>
-      <Pill active={page === "about"} onClick={() => setPage("about")}>About RCv</Pill>
-    </div>
-    {page === "rankings" && <RankingsPage onSelectPlayer={setSelectedPlayer} parsedData={parsedData} setParsedData={setParsedData} />}
-    {page === "about" && <AboutPage />}
-    <div style={{ marginTop: 32, paddingTop: 16, borderTop: `1px solid ${C.bdr}`, textAlign: "center", fontSize: 11, color: C.mut }}>RCv — Created by Clayton Jones · Data via MLB Statcast</div>
+  return(<div style={{minHeight:"100vh",padding:"20px 12px"}}><div style={{maxWidth:700,margin:"0 auto"}}>
+    {header}
+    {!selectedPlayer&&<div style={{display:"flex",gap:2,padding:3,background:C.card,borderRadius:8,border:`1px solid ${C.bdr}`,marginBottom:18,justifyContent:"center"}}>
+      <Pill active={page==="rankings"} onClick={()=>setPage("rankings")}>Rankings</Pill>
+      <Pill active={page==="about"} onClick={()=>setPage("about")}>About RCv</Pill>
+    </div>}
+    {page==="rankings"&&<RankingsPage onSelectPlayer={setSelectedPlayer} parsedData={parsedData}/>}
+    {page==="about"&&<AboutPage/>}
+    <div style={{marginTop:32,paddingTop:16,borderTop:`1px solid ${C.bdr}`,textAlign:"center",fontSize:11,color:C.mut}}>RCv — Created by Clayton Jones · Data via MLB Statcast</div>
   </div></div>);
 }
 
-ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
 </script>
 </body>
 </html>
