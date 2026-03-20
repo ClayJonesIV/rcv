@@ -1,0 +1,682 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>RCv — Run Conversion Value</title>
+  <meta name="description" content="RCv measures a batter's ability to drive in runs relative to league average, adjusted for the 24 base-out situations they face." />
+  <meta property="og:title" content="RCv — Run Conversion Value" />
+  <meta property="og:description" content="A situation-adjusted RBI efficiency stat for MLB batters. Compare players across seasons." />
+  <link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600;700;800;900&family=IBM+Plex+Mono:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #0b0d14; color: #dfe1ec; font-family: 'Barlow', sans-serif; -webkit-font-smoothing: antialiased; }
+    input[type="number"]::-webkit-inner-spin-button,
+    input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+    input[type="number"] { -moz-appearance: textfield; }
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #2a2f48; border-radius: 3px; }
+    ::selection { background: #4f8aff44; }
+  </style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useRef, useCallback, useMemo, useEffect } = React;
+
+/* ─── Constants ─── */
+const BASES = [
+  { key: "___", label: "Empty", short: "—" }, { key: "1__", label: "1st", short: "1B" },
+  { key: "_2_", label: "2nd", short: "2B" }, { key: "__3", label: "3rd", short: "3B" },
+  { key: "12_", label: "1st & 2nd", short: "1,2" }, { key: "1_3", label: "1st & 3rd", short: "1,3" },
+  { key: "_23", label: "2nd & 3rd", short: "2,3" }, { key: "123", label: "Loaded", short: "FUL" },
+];
+const OUTS = [0, 1, 2];
+const S24 = []; OUTS.forEach(o => BASES.forEach(b => S24.push({ outs: o, baseKey: b.key, baseLabel: b.label, baseShort: b.short, id: `${o}_${b.key}` })));
+const LR = {
+  "0____":.038,"0_1__":.095,"0__2_":.155,"0___3":.295,"0_12_":.135,"0_1_3":.275,"0__23":.310,"0_123":.280,
+  "1____":.030,"1_1__":.078,"1__2_":.130,"1___3":.245,"1_12_":.115,"1_1_3":.230,"1__23":.265,"1_123":.240,
+  "2____":.022,"2_1__":.058,"2__2_":.105,"2___3":.165,"2_12_":.088,"2_1_3":.155,"2__23":.180,"2_123":.175,
+};
+const K = 50;
+
+/* ─── Engine ─── */
+function computeRCv(pd, lr) {
+  let tPA = 0, ws = 0; const sd = [];
+  S24.forEach(s => {
+    const pa = pd[s.id]?.pa||0, rbi = pd[s.id]?.rbi||0, lgr = lr[s.id]||0; tPA += pa;
+    if (pa > 0 && lgr > 0) { const pr = rbi/pa, ar = (pa*pr+K*lgr)/(pa+K); sd.push({...s, pa, rbi, playerRate:pr, adjRate:ar, leagueRate:lgr, stateScore:ar/lgr}); }
+    else if (pa > 0) sd.push({...s, pa, rbi, playerRate:rbi/pa, adjRate:0, leagueRate:lgr, stateScore:1.0});
+  });
+  if (tPA===0) return {rcv:null, stateDetails:sd, totalPA:0, totalRBI:0};
+  sd.forEach(d => { ws += d.stateScore*(d.pa/tPA); });
+  return {rcv:ws, stateDetails:sd, totalPA:tPA, totalRBI:sd.reduce((s,d)=>s+d.rbi,0)};
+}
+
+function parseCSV(text) {
+  const lines = text.trim().split("\n").filter(l => l.trim());
+  if (lines.length < 2) return null;
+  const h = lines[0].split(",").map(x => x.trim().toLowerCase());
+  const pi=h.findIndex(x=>x==="player"||x==="name"), oi=h.findIndex(x=>x==="outs"),
+    bi=h.findIndex(x=>x==="bases"||x==="runners"||x==="base_state"),
+    pai=h.findIndex(x=>x==="pa"||x==="plate_appearances"),
+    ri=h.findIndex(x=>x==="rbi"||x==="runs_batted_in"),
+    si=h.findIndex(x=>x==="season"||x==="year");
+  if (pi===-1||oi===-1||bi===-1||pai===-1||ri===-1) return null;
+  const hasSeason = si!==-1, raw = [];
+  for (let i=1; i<lines.length; i++) {
+    const cc = lines[i].split(",").map(x=>x.trim());
+    const name=cc[pi], outs=parseInt(cc[oi]), bases=cc[bi], pa=parseInt(cc[pai]), rbi=parseInt(cc[ri]);
+    const season = hasSeason ? cc[si] : "All";
+    if (!name||isNaN(outs)||isNaN(pa)||isNaN(rbi)) continue;
+    raw.push({name,season,outs,bases,pa,rbi});
+  }
+  return {raw, seasons:[...new Set(raw.map(r=>r.season))].sort(), hasSeason};
+}
+
+function aggregate(raw, sf) {
+  const f = sf==="All" ? raw : raw.filter(r=>r.season===sf);
+  const m = {};
+  f.forEach(r => { if(!m[r.name]) m[r.name]={}; const sid=`${r.outs}_${r.bases}`; if(!m[r.name][sid]) m[r.name][sid]={pa:0,rbi:0}; m[r.name][sid].pa+=r.pa; m[r.name][sid].rbi+=r.rbi; });
+  return Object.entries(m).map(([name,data])=>({name,...computeRCv(data,LR)}));
+}
+
+/*
+ * ─── PRE-LOADED DATA ───
+ * INSTRUCTIONS: Replace the string below with your real rcv_data.csv contents.
+ * After running rcv_builder.py, open rcv_data.csv in Notepad, Select All (Ctrl+A),
+ * Copy (Ctrl+C), and paste it between the backticks below, replacing the sample data.
+ */
+const PRELOADED_CSV = `player,season,outs,bases,pa,rbi
+Aaron Judge,2024,0,___,148,6
+Aaron Judge,2024,0,1__,52,8
+Aaron Judge,2024,0,_2_,38,12
+Aaron Judge,2024,0,__3,15,7
+Aaron Judge,2024,0,12_,28,10
+Aaron Judge,2024,0,1_3,12,6
+Aaron Judge,2024,0,_23,10,7
+Aaron Judge,2024,0,123,14,9
+Aaron Judge,2024,1,___,112,4
+Aaron Judge,2024,1,1__,44,5
+Aaron Judge,2024,1,_2_,32,8
+Aaron Judge,2024,1,__3,18,8
+Aaron Judge,2024,1,12_,22,6
+Aaron Judge,2024,1,1_3,10,5
+Aaron Judge,2024,1,_23,8,5
+Aaron Judge,2024,1,123,12,7
+Aaron Judge,2024,2,___,88,3
+Aaron Judge,2024,2,1__,38,4
+Aaron Judge,2024,2,_2_,28,6
+Aaron Judge,2024,2,__3,14,4
+Aaron Judge,2024,2,12_,18,4
+Aaron Judge,2024,2,1_3,8,3
+Aaron Judge,2024,2,_23,6,3
+Aaron Judge,2024,2,123,10,5
+Shohei Ohtani,2024,0,___,142,5
+Shohei Ohtani,2024,0,1__,48,7
+Shohei Ohtani,2024,0,_2_,35,10
+Shohei Ohtani,2024,0,__3,12,5
+Shohei Ohtani,2024,0,12_,25,8
+Shohei Ohtani,2024,0,1_3,10,5
+Shohei Ohtani,2024,0,_23,9,6
+Shohei Ohtani,2024,0,123,12,7
+Shohei Ohtani,2024,1,___,108,4
+Shohei Ohtani,2024,1,1__,40,5
+Shohei Ohtani,2024,1,_2_,30,7
+Shohei Ohtani,2024,1,__3,16,7
+Shohei Ohtani,2024,1,12_,20,5
+Shohei Ohtani,2024,1,1_3,9,4
+Shohei Ohtani,2024,1,_23,7,4
+Shohei Ohtani,2024,1,123,10,6
+Shohei Ohtani,2024,2,___,82,2
+Shohei Ohtani,2024,2,1__,35,3
+Shohei Ohtani,2024,2,_2_,25,5
+Shohei Ohtani,2024,2,__3,12,3
+Shohei Ohtani,2024,2,12_,16,3
+Shohei Ohtani,2024,2,1_3,7,2
+Shohei Ohtani,2024,2,_23,5,2
+Shohei Ohtani,2024,2,123,9,4
+Freddie Freeman,2024,0,___,135,4
+Freddie Freeman,2024,0,1__,55,9
+Freddie Freeman,2024,0,_2_,40,14
+Freddie Freeman,2024,0,__3,16,8
+Freddie Freeman,2024,0,12_,30,12
+Freddie Freeman,2024,0,1_3,14,8
+Freddie Freeman,2024,0,_23,11,8
+Freddie Freeman,2024,0,123,15,10
+Freddie Freeman,2024,1,___,105,3
+Freddie Freeman,2024,1,1__,42,6
+Freddie Freeman,2024,1,_2_,34,9
+Freddie Freeman,2024,1,__3,20,9
+Freddie Freeman,2024,1,12_,24,7
+Freddie Freeman,2024,1,1_3,12,6
+Freddie Freeman,2024,1,_23,9,6
+Freddie Freeman,2024,1,123,13,8
+Freddie Freeman,2024,2,___,80,2
+Freddie Freeman,2024,2,1__,36,4
+Freddie Freeman,2024,2,_2_,26,6
+Freddie Freeman,2024,2,__3,15,5
+Freddie Freeman,2024,2,12_,20,5
+Freddie Freeman,2024,2,1_3,9,3
+Freddie Freeman,2024,2,_23,7,3
+Freddie Freeman,2024,2,123,11,5
+Yordan Alvarez,2024,0,___,120,5
+Yordan Alvarez,2024,0,1__,45,7
+Yordan Alvarez,2024,0,_2_,33,10
+Yordan Alvarez,2024,0,__3,14,6
+Yordan Alvarez,2024,0,12_,25,9
+Yordan Alvarez,2024,0,1_3,11,6
+Yordan Alvarez,2024,0,_23,9,6
+Yordan Alvarez,2024,0,123,12,8
+Yordan Alvarez,2024,1,___,92,3
+Yordan Alvarez,2024,1,1__,36,5
+Yordan Alvarez,2024,1,_2_,28,7
+Yordan Alvarez,2024,1,__3,16,7
+Yordan Alvarez,2024,1,12_,20,6
+Yordan Alvarez,2024,1,1_3,9,4
+Yordan Alvarez,2024,1,_23,7,4
+Yordan Alvarez,2024,1,123,10,6
+Yordan Alvarez,2024,2,___,70,2
+Yordan Alvarez,2024,2,1__,30,3
+Yordan Alvarez,2024,2,_2_,22,5
+Yordan Alvarez,2024,2,__3,12,3
+Yordan Alvarez,2024,2,12_,15,3
+Yordan Alvarez,2024,2,1_3,7,2
+Yordan Alvarez,2024,2,_23,5,2
+Yordan Alvarez,2024,2,123,8,4
+Juan Soto,2024,0,___,140,4
+Juan Soto,2024,0,1__,50,7
+Juan Soto,2024,0,_2_,36,10
+Juan Soto,2024,0,__3,14,6
+Juan Soto,2024,0,12_,26,8
+Juan Soto,2024,0,1_3,11,5
+Juan Soto,2024,0,_23,9,5
+Juan Soto,2024,0,123,13,7
+Juan Soto,2024,1,___,108,3
+Juan Soto,2024,1,1__,42,5
+Juan Soto,2024,1,_2_,30,7
+Juan Soto,2024,1,__3,18,7
+Juan Soto,2024,1,12_,22,6
+Juan Soto,2024,1,1_3,10,4
+Juan Soto,2024,1,_23,8,4
+Juan Soto,2024,1,123,11,6
+Juan Soto,2024,2,___,84,2
+Juan Soto,2024,2,1__,36,3
+Juan Soto,2024,2,_2_,26,5
+Juan Soto,2024,2,__3,13,3
+Juan Soto,2024,2,12_,18,3
+Juan Soto,2024,2,1_3,8,2
+Juan Soto,2024,2,_23,6,2
+Juan Soto,2024,2,123,10,4
+Mookie Betts,2024,0,___,125,5
+Mookie Betts,2024,0,1__,42,6
+Mookie Betts,2024,0,_2_,30,8
+Mookie Betts,2024,0,__3,12,5
+Mookie Betts,2024,0,12_,22,7
+Mookie Betts,2024,0,1_3,10,5
+Mookie Betts,2024,0,_23,8,5
+Mookie Betts,2024,0,123,10,6
+Mookie Betts,2024,1,___,95,3
+Mookie Betts,2024,1,1__,36,5
+Mookie Betts,2024,1,_2_,26,6
+Mookie Betts,2024,1,__3,14,6
+Mookie Betts,2024,1,12_,18,5
+Mookie Betts,2024,1,1_3,8,3
+Mookie Betts,2024,1,_23,6,3
+Mookie Betts,2024,1,123,9,5
+Mookie Betts,2024,2,___,72,2
+Mookie Betts,2024,2,1__,30,3
+Mookie Betts,2024,2,_2_,22,4
+Mookie Betts,2024,2,__3,10,3
+Mookie Betts,2024,2,12_,14,3
+Mookie Betts,2024,2,1_3,6,2
+Mookie Betts,2024,2,_23,4,2
+Mookie Betts,2024,2,123,7,3
+Corey Seager,2024,0,___,130,4
+Corey Seager,2024,0,1__,46,6
+Corey Seager,2024,0,_2_,32,9
+Corey Seager,2024,0,__3,14,5
+Corey Seager,2024,0,12_,24,7
+Corey Seager,2024,0,1_3,11,5
+Corey Seager,2024,0,_23,8,5
+Corey Seager,2024,0,123,11,6
+Corey Seager,2024,1,___,100,3
+Corey Seager,2024,1,1__,38,4
+Corey Seager,2024,1,_2_,28,6
+Corey Seager,2024,1,__3,16,6
+Corey Seager,2024,1,12_,20,5
+Corey Seager,2024,1,1_3,9,4
+Corey Seager,2024,1,_23,7,4
+Corey Seager,2024,1,123,10,5
+Corey Seager,2024,2,___,78,2
+Corey Seager,2024,2,1__,32,3
+Corey Seager,2024,2,_2_,24,5
+Corey Seager,2024,2,__3,12,3
+Corey Seager,2024,2,12_,16,3
+Corey Seager,2024,2,1_3,7,2
+Corey Seager,2024,2,_23,5,2
+Corey Seager,2024,2,123,8,3
+Matt Olson,2024,0,___,138,4
+Matt Olson,2024,0,1__,50,5
+Matt Olson,2024,0,_2_,34,8
+Matt Olson,2024,0,__3,14,4
+Matt Olson,2024,0,12_,26,6
+Matt Olson,2024,0,1_3,10,3
+Matt Olson,2024,0,_23,8,4
+Matt Olson,2024,0,123,12,5
+Matt Olson,2024,1,___,106,3
+Matt Olson,2024,1,1__,40,3
+Matt Olson,2024,1,_2_,30,5
+Matt Olson,2024,1,__3,17,5
+Matt Olson,2024,1,12_,21,4
+Matt Olson,2024,1,1_3,9,3
+Matt Olson,2024,1,_23,7,3
+Matt Olson,2024,1,123,11,4
+Matt Olson,2024,2,___,82,2
+Matt Olson,2024,2,1__,34,2
+Matt Olson,2024,2,_2_,25,3
+Matt Olson,2024,2,__3,13,2
+Matt Olson,2024,2,12_,17,2
+Matt Olson,2024,2,1_3,7,1
+Matt Olson,2024,2,_23,5,1
+Matt Olson,2024,2,123,9,3
+Marcus Semien,2024,0,___,145,4
+Marcus Semien,2024,0,1__,48,5
+Marcus Semien,2024,0,_2_,34,7
+Marcus Semien,2024,0,__3,13,4
+Marcus Semien,2024,0,12_,24,5
+Marcus Semien,2024,0,1_3,10,3
+Marcus Semien,2024,0,_23,7,3
+Marcus Semien,2024,0,123,11,4
+Marcus Semien,2024,1,___,110,2
+Marcus Semien,2024,1,1__,40,3
+Marcus Semien,2024,1,_2_,28,4
+Marcus Semien,2024,1,__3,15,4
+Marcus Semien,2024,1,12_,20,3
+Marcus Semien,2024,1,1_3,8,2
+Marcus Semien,2024,1,_23,6,2
+Marcus Semien,2024,1,123,10,3
+Marcus Semien,2024,2,___,86,1
+Marcus Semien,2024,2,1__,36,2
+Marcus Semien,2024,2,_2_,24,3
+Marcus Semien,2024,2,__3,12,2
+Marcus Semien,2024,2,12_,16,2
+Marcus Semien,2024,2,1_3,7,1
+Marcus Semien,2024,2,_23,5,1
+Marcus Semien,2024,2,123,8,2
+Ronald Acuna Jr.,2024,0,___,80,3
+Ronald Acuna Jr.,2024,0,1__,28,3
+Ronald Acuna Jr.,2024,0,_2_,20,5
+Ronald Acuna Jr.,2024,0,__3,8,3
+Ronald Acuna Jr.,2024,0,12_,15,4
+Ronald Acuna Jr.,2024,0,1_3,6,2
+Ronald Acuna Jr.,2024,0,_23,5,3
+Ronald Acuna Jr.,2024,0,123,7,3
+Ronald Acuna Jr.,2024,1,___,60,2
+Ronald Acuna Jr.,2024,1,1__,22,2
+Ronald Acuna Jr.,2024,1,_2_,16,3
+Ronald Acuna Jr.,2024,1,__3,10,3
+Ronald Acuna Jr.,2024,1,12_,12,2
+Ronald Acuna Jr.,2024,1,1_3,5,2
+Ronald Acuna Jr.,2024,1,_23,4,2
+Ronald Acuna Jr.,2024,1,123,6,3
+Ronald Acuna Jr.,2024,2,___,46,1
+Ronald Acuna Jr.,2024,2,1__,18,1
+Ronald Acuna Jr.,2024,2,_2_,14,2
+Ronald Acuna Jr.,2024,2,__3,7,2
+Ronald Acuna Jr.,2024,2,12_,10,2
+Ronald Acuna Jr.,2024,2,1_3,4,1
+Ronald Acuna Jr.,2024,2,_23,3,1
+Ronald Acuna Jr.,2024,2,123,5,2`;
+
+/* ─── Styles ─── */
+const mono = "'IBM Plex Mono', monospace";
+const C = {
+  bg:"#0b0d14",card:"#111420",cardH:"#161a28",bdr:"#1e2235",bdrL:"#2a2f48",
+  txt:"#dfe1ec",dim:"#7b8098",mut:"#4a4f68",acc:"#4f8aff",
+  grn:"#34d399",grnBg:"#0d2a20",yel:"#fbbf24",ylBg:"#2a2410",
+  red:"#f87171",rdBg:"#2a1215",org:"#fb923c",
+};
+const rc = v => { if(v===null)return C.dim; if(v>=1.15)return C.grn; if(v>=1.05)return"#86efac"; if(v>=.95)return C.yel; if(v>=.85)return C.org; return C.red; };
+const rl = v => { if(v===null)return"N/A"; if(v>=1.15)return"Elite"; if(v>=1.05)return"Above Avg"; if(v>=.95)return"Average"; if(v>=.85)return"Below Avg"; return"Poor"; };
+
+/* ─── Components ─── */
+function RCvBar({value, height=8}) {
+  if(value===null) return null;
+  const pct = Math.max(0,Math.min(100,((value-.5)/1)*100));
+  return (
+    <div style={{width:"100%",position:"relative",height,background:C.bdr,borderRadius:height/2}}>
+      <div style={{position:"absolute",left:"50%",top:0,width:1,height:"100%",background:`${C.mut}55`}}/>
+      <div style={{position:"absolute",left:`${pct}%`,top:"50%",transform:"translate(-50%,-50%)",width:height+6,height:height+6,borderRadius:"50%",background:rc(value),border:`2px solid ${C.bg}`,boxShadow:`0 0 6px ${rc(value)}44`,transition:"left 0.4s"}}/>
+    </div>
+  );
+}
+
+function StateBreakdown({details}) {
+  if(!details?.length) return null;
+  const sorted = [...details].sort((a,b)=>b.pa-a.pa);
+  return (
+    <div style={{marginTop:14,maxHeight:300,overflowY:"auto",fontSize:11}}>
+      <table style={{width:"100%",borderCollapse:"collapse",fontFamily:mono}}>
+        <thead><tr style={{borderBottom:`1px solid ${C.bdr}`,color:C.mut,textTransform:"uppercase",fontSize:9,letterSpacing:1}}>
+          {["State","PA","RBI","Rate","Lg Avg","Adj","Score"].map((h,i)=><th key={h} style={{padding:"6px 6px",textAlign:i===0?"left":"right",fontWeight:600}}>{h}</th>)}
+        </tr></thead>
+        <tbody>{sorted.map(d=>(
+          <tr key={d.id} style={{borderBottom:`1px solid ${C.bg}`}}>
+            <td style={{padding:"5px 6px",color:C.txt}}>{d.outs}out {d.baseLabel}</td>
+            <td style={{padding:"5px 6px",textAlign:"right",color:C.dim}}>{d.pa}</td>
+            <td style={{padding:"5px 6px",textAlign:"right",color:C.dim}}>{d.rbi}</td>
+            <td style={{padding:"5px 6px",textAlign:"right",color:C.txt}}>{(d.playerRate*100).toFixed(1)}%</td>
+            <td style={{padding:"5px 6px",textAlign:"right",color:C.mut}}>{(d.leagueRate*100).toFixed(1)}%</td>
+            <td style={{padding:"5px 6px",textAlign:"right",color:C.txt}}>{(d.adjRate*100).toFixed(1)}%</td>
+            <td style={{padding:"5px 6px",textAlign:"right",color:rc(d.stateScore),fontWeight:700}}>{d.stateScore.toFixed(3)}</td>
+          </tr>
+        ))}</tbody>
+      </table>
+    </div>
+  );
+}
+
+function Pill({active,onClick,children}) {
+  return <button onClick={onClick} style={{padding:"8px 18px",border:"none",borderRadius:6,background:active?C.acc:"transparent",color:active?"#fff":C.dim,fontSize:13,fontWeight:600,cursor:"pointer",fontFamily:"'Barlow',sans-serif",transition:"all 0.2s",whiteSpace:"nowrap"}}>{children}</button>;
+}
+function SPill({active,onClick,children}) {
+  return <button onClick={onClick} style={{padding:"5px 12px",border:`1px solid ${active?C.acc:C.bdr}`,borderRadius:20,background:active?`${C.acc}22`:"transparent",color:active?C.acc:C.dim,fontSize:11,fontWeight:600,cursor:"pointer",fontFamily:mono,transition:"all 0.2s"}}>{children}</button>;
+}
+
+/* ─── Rankings Page ─── */
+function RankingsPage() {
+  const [rawData, setRawData] = useState(null);
+  const [seasons, setSeasons] = useState([]);
+  const [activeSeason, setActiveSeason] = useState("All");
+  const [selected, setSelected] = useState(null);
+  const [sortField, setSortField] = useState("rcv");
+  const [sortDir, setSortDir] = useState("desc");
+  const [search, setSearch] = useState("");
+  const [isPreloaded, setIsPreloaded] = useState(true);
+  const fileRef = useRef();
+
+  // Load preloaded data on mount
+  useEffect(()=>{
+    const parsed = parseCSV(PRELOADED_CSV);
+    if(parsed && parsed.raw?.length) { setRawData(parsed.raw); setSeasons(parsed.hasSeason?parsed.seasons:[]); }
+  },[]);
+
+  const handleFile = useCallback(e=>{
+    const file = e.target?.files?.[0]||e.dataTransfer?.files?.[0];
+    if(!file) return;
+    setSelected(null); setActiveSeason("All"); setIsPreloaded(false);
+    const reader = new FileReader();
+    reader.onload = ev => {
+      const parsed = parseCSV(ev.target.result);
+      if(parsed && parsed.raw?.length) { setRawData(parsed.raw); setSeasons(parsed.hasSeason?parsed.seasons:[]); }
+    };
+    reader.readAsText(file);
+  },[]);
+
+  const results = useMemo(()=> rawData ? aggregate(rawData, activeSeason) : [], [rawData, activeSeason]);
+
+  const sorted = useMemo(()=>{
+    let f = results;
+    if(search) f = f.filter(p=>p.name.toLowerCase().includes(search.toLowerCase()));
+    return [...f].sort((a,b)=>{
+      const av=sortField==="name"?a.name:sortField==="totalPA"?a.totalPA:sortField==="totalRBI"?a.totalRBI:(a.rcv||0);
+      const bv=sortField==="name"?b.name:sortField==="totalPA"?b.totalPA:sortField==="totalRBI"?b.totalRBI:(b.rcv||0);
+      if(typeof av==="string") return sortDir==="asc"?av.localeCompare(bv):bv.localeCompare(av);
+      return sortDir==="asc"?av-bv:bv-av;
+    });
+  },[results,search,sortField,sortDir]);
+
+  const playerSeasons = useMemo(()=>{
+    if(!rawData||!selected||seasons.length<2) return null;
+    return seasons.map(s=>{const r=aggregate(rawData,s);const p=r.find(x=>x.name===selected);return p?{season:s,...p}:null;}).filter(Boolean);
+  },[rawData,selected,seasons]);
+
+  const toggleSort = f => { if(sortField===f) setSortDir(d=>d==="asc"?"desc":"asc"); else{setSortField(f);setSortDir(f==="name"?"asc":"desc");} };
+  const Arrow = ({f}) => sortField!==f ? <span style={{color:C.mut,opacity:.3}}>↕</span> : <span style={{color:C.acc}}>{sortDir==="asc"?"↑":"↓"}</span>;
+
+  return (
+    <div>
+      {/* Upload bar */}
+      <div onDrop={e=>{e.preventDefault();handleFile(e);}} onDragOver={e=>e.preventDefault()} onClick={()=>fileRef.current?.click()}
+        style={{padding:14,border:`1px dashed ${C.bdr}`,borderRadius:8,textAlign:"center",cursor:"pointer",background:C.card,transition:"border-color 0.2s",marginBottom:14,display:"flex",alignItems:"center",justifyContent:"center",gap:10}}
+        onMouseEnter={e=>e.currentTarget.style.borderColor=C.acc} onMouseLeave={e=>e.currentTarget.style.borderColor=C.bdr}>
+        <input ref={fileRef} type="file" accept=".csv" onChange={handleFile} style={{display:"none"}}/>
+        <span style={{fontSize:16}}>📄</span>
+        <span style={{color:C.dim,fontSize:12}}>Upload your own CSV to replace {isPreloaded ? "sample" : "current"} data</span>
+        <span style={{color:C.mut,fontSize:10,fontFamily:mono}}>player, season, outs, bases, pa, rbi</span>
+      </div>
+
+      {isPreloaded && (
+        <div style={{padding:10,background:C.ylBg,border:`1px solid ${C.yel}33`,borderRadius:6,fontSize:11,color:C.yel,marginBottom:14,textAlign:"center"}}>
+          Showing sample data — upload your <span style={{fontFamily:mono}}>rcv_data.csv</span> from the builder script for real rankings
+        </div>
+      )}
+
+      {rawData && (
+        <div>
+          {seasons.length > 0 && (
+            <div style={{marginBottom:14}}>
+              <div style={{fontSize:10,color:C.mut,textTransform:"uppercase",letterSpacing:1.5,marginBottom:6}}>Season</div>
+              <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+                <SPill active={activeSeason==="All"} onClick={()=>{setActiveSeason("All");setSelected(null);}}>{seasons.length>1?"Career":"All"}</SPill>
+                {seasons.map(s=><SPill key={s} active={activeSeason===s} onClick={()=>{setActiveSeason(s);setSelected(null);}}>{s}</SPill>)}
+              </div>
+            </div>
+          )}
+
+          <input type="text" value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search players..."
+            style={{width:"100%",padding:"9px 14px",background:C.bg,border:`1px solid ${C.bdr}`,borderRadius:6,color:C.txt,fontSize:13,fontFamily:"'Barlow',sans-serif",outline:"none",marginBottom:12}} />
+
+          <div style={{fontSize:10,color:C.mut,textTransform:"uppercase",letterSpacing:1.5,marginBottom:8}}>
+            {sorted.length} Players{activeSeason!=="All"?` — ${activeSeason}`:seasons.length>1?" — Career":""}
+          </div>
+
+          <div style={{maxHeight:420,overflowY:"auto"}}>
+            <table style={{width:"100%",borderCollapse:"collapse",fontSize:12,fontFamily:mono}}>
+              <thead><tr style={{borderBottom:`1px solid ${C.bdr}`,color:C.mut,position:"sticky",top:0,background:C.card,zIndex:1}}>
+                <th style={{padding:"7px 8px",textAlign:"left",width:30,fontWeight:600}}>#</th>
+                <th style={{padding:"7px 8px",textAlign:"left",cursor:"pointer",fontWeight:600}} onClick={()=>toggleSort("name")}>Player <Arrow f="name"/></th>
+                <th style={{padding:"7px 8px",textAlign:"right",cursor:"pointer",fontWeight:600}} onClick={()=>toggleSort("totalPA")}>PA <Arrow f="totalPA"/></th>
+                <th style={{padding:"7px 8px",textAlign:"right",cursor:"pointer",fontWeight:600}} onClick={()=>toggleSort("totalRBI")}>RBI <Arrow f="totalRBI"/></th>
+                <th style={{padding:"7px 8px",textAlign:"right",cursor:"pointer",fontWeight:600}} onClick={()=>toggleSort("rcv")}>RCv <Arrow f="rcv"/></th>
+                <th style={{padding:"7px 8px",width:110}}></th>
+              </tr></thead>
+              <tbody>{sorted.map((p,i)=>(
+                <tr key={p.name} onClick={()=>setSelected(selected===p.name?null:p.name)}
+                  style={{borderBottom:`1px solid ${selected===p.name?C.bdrL:C.bg}`,cursor:"pointer",background:selected===p.name?C.cardH:"transparent",transition:"background 0.15s"}}>
+                  <td style={{padding:"7px 8px",color:i<3?C.acc:C.mut,fontSize:i<3?13:10,fontWeight:i<3?800:400}}>{i+1}</td>
+                  <td style={{padding:"7px 8px",color:C.txt,fontWeight:500}}>{p.name}</td>
+                  <td style={{padding:"7px 8px",textAlign:"right",color:C.dim}}>{p.totalPA}</td>
+                  <td style={{padding:"7px 8px",textAlign:"right",color:C.dim}}>{p.totalRBI}</td>
+                  <td style={{padding:"7px 8px",textAlign:"right",color:rc(p.rcv),fontWeight:700}}>{p.rcv!==null?p.rcv.toFixed(3):"—"}</td>
+                  <td style={{padding:"7px 8px"}}><RCvBar value={p.rcv} height={5}/></td>
+                </tr>
+              ))}</tbody>
+            </table>
+          </div>
+
+          {selected && (()=>{
+            const p = sorted.find(x=>x.name===selected);
+            if(!p) return null;
+            return (
+              <div style={{marginTop:14,padding:16,background:C.card,borderRadius:8,border:`1px solid ${C.bdr}`}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                  <div>
+                    <div style={{fontSize:10,color:C.mut,textTransform:"uppercase",letterSpacing:1.5}}>{p.name}</div>
+                    <span style={{fontSize:28,fontWeight:800,fontFamily:mono,color:rc(p.rcv)}}>{p.rcv?.toFixed(3)||"—"}</span>
+                    <span style={{fontSize:11,color:rc(p.rcv),fontWeight:600,marginLeft:8}}>{rl(p.rcv)}</span>
+                  </div>
+                  <div style={{fontFamily:mono,textAlign:"right",fontSize:11,color:C.dim}}>{p.totalPA} PA · {p.totalRBI} RBI</div>
+                </div>
+                <div style={{margin:"10px 0"}}><RCvBar value={p.rcv}/></div>
+
+                {playerSeasons && playerSeasons.length>1 && activeSeason==="All" && (
+                  <div style={{marginTop:14,padding:12,background:C.bg,borderRadius:6}}>
+                    <div style={{fontSize:10,color:C.mut,textTransform:"uppercase",letterSpacing:1.5,marginBottom:8}}>Season Breakdown</div>
+                    <div style={{display:"grid",gridTemplateColumns:"60px 60px 50px 70px 1fr",gap:"4px 8px",fontSize:11,fontFamily:mono,alignItems:"center"}}>
+                      <div style={{color:C.mut,fontWeight:700}}>Year</div>
+                      <div style={{color:C.mut,fontWeight:700,textAlign:"right"}}>PA</div>
+                      <div style={{color:C.mut,fontWeight:700,textAlign:"right"}}>RBI</div>
+                      <div style={{color:C.mut,fontWeight:700,textAlign:"right"}}>RCv</div>
+                      <div/>
+                      {playerSeasons.map(ps=>(<div key={ps.season} style={{display:"contents"}}>
+                        <div style={{color:C.txt,fontWeight:600}}>{ps.season}</div>
+                        <div style={{color:C.dim,textAlign:"right"}}>{ps.totalPA}</div>
+                        <div style={{color:C.dim,textAlign:"right"}}>{ps.totalRBI}</div>
+                        <div style={{color:rc(ps.rcv),fontWeight:700,textAlign:"right"}}>{ps.rcv?.toFixed(3)||"—"}</div>
+                        <div style={{paddingLeft:4}}><RCvBar value={ps.rcv} height={4}/></div>
+                      </div>))}
+                    </div>
+                  </div>
+                )}
+                <StateBreakdown details={p.stateDetails}/>
+              </div>
+            );
+          })()}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ─── Manual Page ─── */
+function ManualPage() {
+  const [name,setName]=useState(""); const [entries,setEntries]=useState({}); const [result,setResult]=useState(null);
+  const [expanded,setExpanded]=useState({0:true,1:false,2:false});
+  const update=(sid,f,v)=>setEntries(p=>({...p,[sid]:{...p[sid],[f]:parseInt(v)||0}}));
+  return (
+    <div>
+      <label style={{fontSize:10,color:C.mut,textTransform:"uppercase",letterSpacing:1.5,display:"block",marginBottom:5}}>Player Name</label>
+      <input type="text" value={name} onChange={e=>setName(e.target.value)} placeholder="e.g. Mookie Betts"
+        style={{width:"100%",padding:"10px 14px",background:C.bg,border:`1px solid ${C.bdr}`,borderRadius:6,color:C.txt,fontSize:14,fontFamily:mono,outline:"none",marginBottom:16}}/>
+      {OUTS.map(o=>(
+        <div key={o} style={{marginBottom:8}}>
+          <button onClick={()=>setExpanded(p=>({...p,[o]:!p[o]}))}
+            style={{width:"100%",display:"flex",justifyContent:"space-between",padding:"10px 14px",background:expanded[o]?C.card:C.bg,border:`1px solid ${C.bdr}`,borderRadius:6,color:C.txt,cursor:"pointer",fontSize:13,fontWeight:600,fontFamily:"'Barlow',sans-serif"}}>
+            <span>{o} Outs</span><span style={{color:C.mut}}>{expanded[o]?"−":"+"}</span>
+          </button>
+          {expanded[o]&&(
+            <div style={{padding:"10px 0 0",display:"grid",gridTemplateColumns:"1fr 72px 72px 72px",gap:"3px 6px",alignItems:"center",fontSize:11}}>
+              <div style={{color:C.mut,fontWeight:700}}>Runners</div><div style={{color:C.mut,fontWeight:700,textAlign:"center"}}>PA</div><div style={{color:C.mut,fontWeight:700,textAlign:"center"}}>RBI</div><div style={{color:C.mut,fontWeight:700,textAlign:"center"}}>Lg Avg</div>
+              {BASES.map(b=>{const sid=`${o}_${b.key}`;return(<div key={sid} style={{display:"contents"}}>
+                <div style={{color:C.txt,fontFamily:mono,padding:"3px 0"}}>{b.label}</div>
+                <input type="number" min="0" value={entries[sid]?.pa||""} onChange={e=>update(sid,"pa",e.target.value)} placeholder="0" style={{width:"100%",padding:"5px 6px",background:C.bg,border:`1px solid ${C.bdr}`,borderRadius:4,color:C.txt,fontSize:11,textAlign:"center",fontFamily:mono,outline:"none"}}/>
+                <input type="number" min="0" value={entries[sid]?.rbi||""} onChange={e=>update(sid,"rbi",e.target.value)} placeholder="0" style={{width:"100%",padding:"5px 6px",background:C.bg,border:`1px solid ${C.bdr}`,borderRadius:4,color:C.txt,fontSize:11,textAlign:"center",fontFamily:mono,outline:"none"}}/>
+                <div style={{color:C.mut,textAlign:"center",fontFamily:mono}}>{((LR[sid]||0)*100).toFixed(1)}%</div>
+              </div>);})}
+            </div>
+          )}
+        </div>
+      ))}
+      <div style={{display:"flex",gap:8,marginTop:14}}>
+        <button onClick={()=>setResult(computeRCv(entries,LR))} style={{flex:1,padding:"11px 20px",background:C.acc,border:"none",borderRadius:6,color:"#fff",fontSize:14,fontWeight:700,cursor:"pointer",fontFamily:"'Barlow',sans-serif"}}>Calculate RCv</button>
+        <button onClick={()=>{setEntries({});setResult(null);setName("");}} style={{padding:"11px 18px",background:"transparent",border:`1px solid ${C.bdr}`,borderRadius:6,color:C.dim,fontSize:13,cursor:"pointer",fontFamily:"'Barlow',sans-serif"}}>Clear</button>
+      </div>
+      {result&&(
+        <div style={{marginTop:20,padding:18,background:C.card,borderRadius:8,border:`1px solid ${C.bdr}`}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+            <div><div style={{fontSize:10,color:C.mut,textTransform:"uppercase",letterSpacing:1.5}}>{name||"Player"}</div>
+              <div style={{fontSize:40,fontWeight:800,fontFamily:mono,color:rc(result.rcv),lineHeight:1.1,marginTop:2}}>{result.rcv!==null?result.rcv.toFixed(3):"—"}</div>
+              <div style={{fontSize:11,color:rc(result.rcv),fontWeight:600,marginTop:2}}>{rl(result.rcv)}</div></div>
+            <div style={{textAlign:"right",fontFamily:mono}}><div style={{fontSize:10,color:C.mut}}>PA</div><div style={{fontSize:18,fontWeight:700,color:C.txt}}>{result.totalPA}</div>
+              <div style={{fontSize:10,color:C.mut,marginTop:4}}>RBI</div><div style={{fontSize:18,fontWeight:700,color:C.txt}}>{result.totalRBI}</div></div>
+          </div>
+          <div style={{margin:"12px 0 4px"}}><RCvBar value={result.rcv}/><div style={{display:"flex",justifyContent:"space-between",fontSize:9,color:C.mut,marginTop:3,fontFamily:mono}}><span>0.50</span><span>1.00</span><span>1.50</span></div></div>
+          <StateBreakdown details={result.stateDetails}/>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ─── About Page ─── */
+function AboutPage() {
+  return (
+    <div style={{fontSize:13,color:C.txt,lineHeight:1.8}}>
+      <h3 style={{fontWeight:700,fontSize:16,margin:"0 0 14px"}}>What is RCv?</h3>
+      <p style={{color:C.dim,marginBottom:16}}>Run Conversion Value measures how well a batter drives in runs compared to the league average, after adjusting for the specific base-out situations they face. A player who hits cleanup behind three high-OBP guys gets more RBI opportunities — RCv strips that advantage away and asks: given the situations you actually faced, did you convert runs above or below average?</p>
+
+      <div style={{padding:16,background:C.card,borderRadius:8,border:`1px solid ${C.bdr}`,marginBottom:14,fontFamily:mono,fontSize:12,lineHeight:2}}>
+        <div><span style={{color:C.acc}}>adj_rate(s)</span> <span style={{color:C.mut}}>=</span> (PA(s) × rate(s) + k × lg_rate(s)) <span style={{color:C.mut}}>/</span> (PA(s) + k)</div>
+        <div><span style={{color:C.acc}}>state_score(s)</span> <span style={{color:C.mut}}>=</span> adj_rate(s) <span style={{color:C.mut}}>/</span> lg_rate(s)</div>
+        <div><span style={{color:C.acc}}>RCv</span> <span style={{color:C.mut}}>=</span> Σ( state_score(s) × PA(s) / total_PA )</div>
+      </div>
+
+      <h3 style={{fontWeight:700,fontSize:15,margin:"16px 0 10px"}}>How It Works</h3>
+      <p style={{color:C.dim,marginBottom:12}}>Every plate appearance happens in one of 24 base-out states (8 base configurations × 3 out states). For each state, RCv compares the player's RBI rate to the league average, applies Bayesian shrinkage (k={K}) to stabilize small samples, then weights each state by how often the player faced it.</p>
+
+      <div style={{padding:14,background:C.card,borderRadius:8,border:`1px solid ${C.bdr}`,marginBottom:14}}>
+        <div style={{fontSize:10,color:C.mut,textTransform:"uppercase",letterSpacing:1.5,marginBottom:8}}>Scale</div>
+        {[
+          {min:"1.15+",label:"Elite",color:C.grn}, {min:"1.05–1.15",label:"Above Avg",color:"#86efac"},
+          {min:"0.95–1.05",label:"Average",color:C.yel}, {min:"0.85–0.95",label:"Below Avg",color:C.org},
+          {min:"< 0.85",label:"Poor",color:C.red},
+        ].map(r=>(
+          <div key={r.label} style={{display:"flex",alignItems:"center",gap:10,padding:"5px 0",borderBottom:`1px solid ${C.bg}`}}>
+            <div style={{width:8,height:8,borderRadius:"50%",background:r.color,flexShrink:0}}/>
+            <div style={{fontFamily:mono,fontSize:11,color:C.dim,width:70,flexShrink:0}}>{r.min}</div>
+            <div style={{fontWeight:600,color:r.color,fontSize:12}}>{r.label}</div>
+          </div>
+        ))}
+      </div>
+
+      <h3 style={{fontWeight:700,fontSize:15,margin:"16px 0 10px"}}>Data Source</h3>
+      <p style={{color:C.dim,marginBottom:12}}>Data is sourced from MLB's Statcast system via Baseball Savant. The fields used are <span style={{fontFamily:mono,color:C.txt}}>on_1b</span>, <span style={{fontFamily:mono,color:C.txt}}>on_2b</span>, <span style={{fontFamily:mono,color:C.txt}}>on_3b</span>, <span style={{fontFamily:mono,color:C.txt}}>outs_when_up</span>, <span style={{fontFamily:mono,color:C.txt}}>bat_score</span>, and <span style={{fontFamily:mono,color:C.txt}}>post_bat_score</span> — available free at baseballsavant.mlb.com.</p>
+
+      <div style={{padding:14,background:C.card,borderRadius:8,border:`1px solid ${C.bdr}`}}>
+        <div style={{fontSize:10,color:C.mut,textTransform:"uppercase",letterSpacing:1.5,marginBottom:8}}>League Avg RBI Rates by State</div>
+        <div style={{overflowX:"auto"}}>
+          <table style={{width:"100%",borderCollapse:"collapse",fontSize:10,fontFamily:mono}}>
+            <thead><tr style={{borderBottom:`1px solid ${C.bdr}`,color:C.mut}}><th style={{padding:5,textAlign:"left"}}>Outs</th>{BASES.map(b=><th key={b.key} style={{padding:5,textAlign:"center"}}>{b.short}</th>)}</tr></thead>
+            <tbody>{OUTS.map(o=>(<tr key={o} style={{borderBottom:`1px solid ${C.bg}`}}><td style={{padding:5,color:C.txt,fontWeight:600}}>{o}</td>{BASES.map(b=>{const rate=LR[`${o}_${b.key}`]||0;return<td key={b.key} style={{padding:5,textAlign:"center",color:C.txt,background:`rgba(79,138,255,${Math.min(1,rate/.31)*.2})`}}>{(rate*100).toFixed(1)}%</td>;})}</tr>))}</tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ─── App ─── */
+function App() {
+  const [page,setPage]=useState("rankings");
+  const pages = [{key:"rankings",label:"Rankings"},{key:"manual",label:"Manual Input"},{key:"about",label:"About RCv"}];
+
+  return (
+    <div style={{minHeight:"100vh",padding:"20px 12px"}}>
+      <div style={{maxWidth:680,margin:"0 auto"}}>
+        {/* Header */}
+        <div style={{marginBottom:20,textAlign:"center"}}>
+          <div style={{display:"inline-flex",alignItems:"center",gap:10,marginBottom:6}}>
+            <div style={{width:42,height:42,borderRadius:12,background:"linear-gradient(135deg,#4f8aff,#7c3aed)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,fontWeight:800,fontFamily:mono,color:"#fff",letterSpacing:-0.5}}>RCv</div>
+            <h1 style={{margin:0,fontSize:24,fontWeight:900,letterSpacing:-1}}>Run Conversion Value</h1>
+          </div>
+          <p style={{margin:0,fontSize:12,color:C.dim,maxWidth:480,marginLeft:"auto",marginRight:"auto"}}>Situation-adjusted RBI efficiency across the 24 base-out states. How well does a batter convert runners into runs?</p>
+        </div>
+
+        {/* Nav */}
+        <div style={{display:"flex",gap:2,padding:3,background:C.card,borderRadius:8,border:`1px solid ${C.bdr}`,marginBottom:18,justifyContent:"center"}}>
+          {pages.map(p=><Pill key={p.key} active={page===p.key} onClick={()=>setPage(p.key)}>{p.label}</Pill>)}
+        </div>
+
+        {page==="rankings"&&<RankingsPage/>}
+        {page==="manual"&&<ManualPage/>}
+        {page==="about"&&<AboutPage/>}
+
+        {/* Footer */}
+        <div style={{marginTop:32,paddingTop:16,borderTop:`1px solid ${C.bdr}`,textAlign:"center",fontSize:11,color:C.mut}}>
+          RCv — Created by Clayton Jones · Data via MLB Statcast / Baseball Savant
+        </div>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
